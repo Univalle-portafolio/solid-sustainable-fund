@@ -377,11 +377,27 @@ def insumos(tabla, datos, rf_local, activos, anios=VENTANA_ANIOS, metodo="mezcla
 def seleccionar(consol, indices, datos):
     """Ejecuta toda la metodología con los datos hasta datos['fin']."""
     tabla, rf_local = evaluar_universo(consol, indices, datos)
+    elegibles = int(tabla["Elegible"].sum())
+    if elegibles < POLITICA["min_activos"]:
+        raise ValueError(f"Solo {elegibles} empresas pasan los filtros; se necesitan al menos {POLITICA['min_activos']}.")
+    # Candidatas: las mejores N de cada mercado (N = 5). Si con ellas la política no es factible (p. ej., no hay suficientes
+    # acciones de alto riesgo), se amplía N, en orden del puntaje de bursatilidad, hasta que lo sea.
+    n_max = int(tabla["Puesto en su mercado"].max())
+    w_ini, ultimo_error = None, None
+    for n in range(CANDIDATOS_POR_MERCADO, n_max + 1):
+        cand = list(tabla.index[tabla["Elegible"] & (tabla["Puesto en su mercado"] <= n)])
+        if len(cand) < POLITICA["min_activos"]:
+            continue
+        mu, S, rf = insumos(tabla, datos, rf_local, cand)
+        try:
+            w_ini = pesos_politica(tabla, mu, S, rf)
+            break
+        except ValueError as e:
+            ultimo_error = e
+    if w_ini is None:
+        raise ValueError(f"{ultimo_error} Ni siquiera con las {elegibles} empresas elegibles se cumple la política.")
+    tabla["Candidato"] = tabla["Elegible"] & (tabla["Puesto en su mercado"] <= n)
     cand = list(tabla.index[tabla["Candidato"]])
-    if len(cand) < POLITICA["min_activos"]:
-        raise ValueError(f"Solo {len(cand)} empresas pasan los filtros; se necesitan al menos {POLITICA['min_activos']}.")
-    mu, S, rf = insumos(tabla, datos, rf_local, cand)
-    w_ini = pesos_politica(tabla, mu, S, rf)
 
     # Robustez: 3 ventanas × 2 métodos × 3 topes × 3 tasas = 54 escenarios
     esc = []
@@ -440,7 +456,7 @@ def seleccionar(consol, indices, datos):
                "VaR 95 % 1 mes (USD)": INVERSION * s_p / np.sqrt(12) * norm.ppf(0.95), "Rf": rf}
     return {"fin": datos["fin"], "tabla": tabla, "candidatos": cand, "robustez": robustez, "robustos": robustos,
             "completados": completados, "pesos": w_fin * ACC, "fondo": fondo, "resumen": resumen, "rf_local": rf_local,
-            "escenarios_validos": len(validos)}
+            "escenarios_validos": len(validos), "candidatos_por_mercado": n}
 
 
 # ----------------------------------------------------------------------------------------------
