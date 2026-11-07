@@ -13,8 +13,16 @@ from fpdf import FPDF
 import motor as M
 
 AQUI = os.path.dirname(os.path.abspath(__file__))
-FUENTE = os.path.join(AQUI, "fonts", "DejaVuSans.ttf")
-FUENTE_B = os.path.join(AQUI, "fonts", "DejaVuSans-Bold.ttf")
+def _buscar(nombre):
+    """Busca un archivo en fonts/ o en la raíz del repositorio."""
+    for ruta in (os.path.join(AQUI, "fonts", nombre), os.path.join(AQUI, nombre)):
+        if os.path.exists(ruta):
+            return ruta
+    raise FileNotFoundError(f"No se encontró {nombre} en fonts/ ni en la raíz del repositorio.")
+
+
+FUENTE = _buscar("DejaVuSans.ttf")
+FUENTE_B = _buscar("DejaVuSans-Bold.ttf")
 TINTA, MAR, ARENA, GRIS, LINEA, PEND = (13, 36, 51), (29, 95, 120), (192, 132, 36), (90, 111, 122), (207, 219, 224), (154, 100, 20)
 
 MESES = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"]

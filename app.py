@@ -39,7 +39,7 @@ def usd(x):
 
 # ------------------------------------------------------------------ datos
 def ruta_ranking():
-    c = sorted(glob.glob(os.path.join(AQUI, "data", "ranking*.xlsx")))
+    c = sorted(glob.glob(os.path.join(AQUI, "data", "ranking*.xlsx")) + glob.glob(os.path.join(AQUI, "ranking*.xlsx")))
     return c[0] if c else None
 
 
@@ -90,8 +90,8 @@ if st.sidebar.button("Actualizar precios ahora", width="stretch"):
 fuente = archivo or subido
 if fuente is None:
     st.title("Solid & Sustainable Equity Fund")
-    st.info("Para iniciar, agregue el archivo `ranking_PER_EEUU_Taiwan_Corea.xlsx` en la carpeta `data/` del repositorio, "
-            "o cárguelo en la barra lateral.")
+    st.info("Para iniciar, agregue el archivo del ranking (por ejemplo `ranking_PER_EEUU_Taiwan_Corea.xlsx`) en la raíz del "
+            "repositorio o en la carpeta `data/`, o cárguelo en la barra lateral.")
     st.stop()
 
 consol, indices = M.cargar_ranking(fuente)
