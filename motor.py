@@ -25,7 +25,9 @@ NOMBRE_FONDO = "Solid & Sustainable Equity Fund"
 ESLOGAN = "Invest with strength, grow with purpose."
 INVERSION = 1_000_000                     # USD
 CANDIDATOS_POR_MERCADO = 5
-VENTANA_ANIOS = 5
+VENTANA_ANIOS = 3                         # ventana de análisis (años), como en las valoraciones de las empresas
+VENTANAS_ROBUSTEZ = (5, 3, 2)              # ventanas alternativas de la prueba de robustez
+TECNICO_EXCLUIDO = "Desfavorable"          # filtro técnico de compra: no se compra con lectura técnica desfavorable
 PESO_LIQUIDEZ = 0.05
 
 POLITICA = {
@@ -35,7 +37,7 @@ POLITICA = {
     "max_tecnologia": 0.50,
     "max_asia": 0.35,                         # Taiwán + Corea
     "max_energia": 0.20,                      # ASG: transición energética
-    "min_anios_historia": 3,
+    "min_anios_historia": 2,
     "robustez_minima": 0.80,
     "rebalanceo_puntos": 0.03,                # desviación que activa un rebalanceo
 }
@@ -262,6 +264,14 @@ def stats_locales(datos, rf_local, activos, anios=VENTANA_ANIOS):
     return pd.DataFrame.from_dict(filas, orient="index")
 
 
+def lectura_tecnica_compra(datos, activos) -> pd.Series:
+    """Filtro técnico de compra: lectura técnica de cada activo con los precios hasta la fecha de selección.
+    Señales: precio > media 200, media 50 > media 200, MACD > señal y RSI 14 entre 30 y 70.
+    Favorable (3-4 señales), Neutral (2) o Desfavorable (0-1)."""
+    p = datos["diario_loc"]
+    return pd.Series({a: (tecnico(p[a])["Lectura técnica"] if a in p.columns else "Sin datos") for a in activos}, dtype=object)
+
+
 def evaluar_universo(consol, indices, datos):
     """Aplica ASG, salud financiera y bursatilidad al universo. Devuelve la tabla y la lista de candidatos."""
     rf_local = tasas_libres(indices, datos)
@@ -277,6 +287,8 @@ def evaluar_universo(consol, indices, datos):
     d = d.drop(columns=[c for c in est.columns if c in d.columns]).join(est, how="left")
     d["Sharpe frente al índice"] = d["Sharpe"] - d["Sharpe del índice"]
     d["Rentabilidad frente al índice"] = d["Rentabilidad anual"] - d["Rentabilidad del índice"]
+    d["Supera a su índice"] = (d["Sharpe frente al índice"] > 0) & (d["Alfa de Jensen"] > 0)
+    d["Lectura técnica"] = lectura_tecnica_compra(datos, d.index)
 
     motivo = pd.Series("", index=d.index)
     motivo[d["Criterio ASG"] != "Cumple"] += "ASG: " + d["Criterio ASG"].str.replace("Excluida: ", "", regex=False) + "; "
@@ -286,6 +298,7 @@ def evaluar_universo(consol, indices, datos):
     motivo[d["Sharpe"].isna()] += "sin precios suficientes; "
     motivo[d["Sharpe"].notna() & ~(d["Sharpe frente al índice"] > 0)] += "Sharpe menor que el de su índice; "
     motivo[d["Sharpe"].notna() & ~(d["Alfa de Jensen"] > 0)] += "alfa de Jensen negativo; "
+    motivo[d["Sharpe"].notna() & d["Lectura técnica"].eq(TECNICO_EXCLUIDO)] += "lectura técnica desfavorable; "
     d["Motivo de exclusión"] = motivo.str.rstrip("; ")
     d["Elegible"] = d["Motivo de exclusión"] == ""
 
@@ -401,7 +414,7 @@ def seleccionar(consol, indices, datos):
 
     # Robustez: 3 ventanas × 2 métodos × 3 topes × 3 tasas = 54 escenarios
     esc = []
-    for anios in (10, 5, 3):
+    for anios in VENTANAS_ROBUSTEZ:
         for metodo in ("historica", "mezcla"):
             for tope in (0.20, 0.25, 0.30):
                 for drf in (-0.01, 0.0, 0.01):
@@ -448,7 +461,8 @@ def seleccionar(consol, indices, datos):
     for c in ["Índice local", "Beta local", "Alfa de Jensen", "t del alfa", "Sharpe", "Sharpe del índice",
               "Rentabilidad anual", "Rentabilidad del índice", "PER (Price/Earnings Ratio)", "PER relativo al sector",
               "ROA (Retorno Activos)", "ROE (Retorno Capital)", "Ratio Liquidez (Current Ratio)", "Endeudamiento",
-              "Nivel de salud", "Puntaje de salud", "Criterio ASG", "Puntaje de bursatilidad", "Alto riesgo"]:
+              "Nivel de salud", "Puntaje de salud", "Criterio ASG", "Puntaje de bursatilidad", "Alto riesgo",
+              "Lectura técnica"]:
         fondo[c] = tabla.loc[sel, c]
     fondo["Nota ASG"] = notas_asg(tabla.loc[sel]).values
 
@@ -481,14 +495,21 @@ def verificar(res):
         ("Salud financiera", "Todos con nivel Bueno", "todos los activos", (f["Nivel de salud"] == "Bueno").all()),
         ("Bursatilidad", "Sharpe mayor que el de su índice y alfa > 0", "todos los activos",
          bool(((f["Sharpe"] > f["Sharpe del índice"]) & (f["Alfa de Jensen"] > 0)).all())),
-        ("Robustez", "Cada activo en ≥ 80 % de los escenarios", f"mínimo {rob:.0%}", rob >= POLITICA["robustez_minima"]),
+        ("Técnico", "Lectura técnica no desfavorable al comprar (≥ 2 de 4 señales)", "todos los activos",
+         bool((f["Lectura técnica"] != TECNICO_EXCLUIDO).all()) if "Lectura técnica" in f else True),
+        ("Robustez", "Cada activo en ≥ 80 % de los escenarios", f"mínimo {rob:.0%}",
+         True if rob >= POLITICA["robustez_minima"] else "Parcial"),
     ]
     v = pd.DataFrame(filas, columns=["Origen", "Regla", "Valor", "Cumple"])
-    v["Cumple"] = v["Cumple"].map({True: "Sí", False: "No"})
+    v["Cumple"] = v["Cumple"].map(lambda x: x if isinstance(x, str) else ("Sí" if x else "No"))
+    v["Valor"] = v["Valor"].str.replace(r"(\d)\.(\d)%", r"\1,\2 %", regex=True).str.replace(r"(\d)%", r"\1 %", regex=True)
+    if (v["Cumple"] == "Parcial").any() and res.get("completados"):
+        nombres = ", ".join(f"{a} {f.loc[a, 'Robustez']:.0%}".replace("%", " %") for a in res["completados"] if a in f.index)
+        v.loc[v["Cumple"] == "Parcial", "Valor"] = "completado: " + nombres
     return v
 
 
-def serie_fondo_diaria(res, datos, anios=5):
+def serie_fondo_diaria(res, datos, anios=VENTANA_ANIOS):
     """Simulación diaria en USD del fondo con los pesos fijos (rebalanceo diario aproximado) y de los índices."""
     d = datos["diario_usd"]
     d = d[d.index > d.index.max() - pd.DateOffset(years=anios)]

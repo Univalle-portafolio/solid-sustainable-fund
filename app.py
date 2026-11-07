@@ -210,11 +210,11 @@ with tabs[0]:
         "Monto": f["Monto (USD)"].map(usd), "E(R) anual": f["E(R) anual USD"].map(pct),
         "Volatilidad": f["Volatilidad anual USD"].map(pct), "Beta local": f["Beta local"].map(num),
         "Contribución al riesgo": f["Contribución al riesgo"].map(pct), "Robustez": f["Robustez"].map(lambda x: pct(x, 0)),
-        "Técnico": R["tec"]["Lectura técnica"].reindex(f.index)})
+        "Técnico al seleccionar": f["Lectura técnica"], "Técnico hoy": R["tec"]["Lectura técnica"].reindex(f.index)})
     st.dataframe(t, width="stretch")
     st.caption(f"Liquidez: {pct(M.PESO_LIQUIDEZ)}. Pesos sobre el valor total del fondo.")
 
-    st.subheader("Evolución de USD 100.000 invertidos hace 5 años")
+    st.subheader(f"Evolución de USD 100.000 invertidos hace {M.VENTANA_ANIOS} años")
     v = (1 + R["serie"].fillna(0)).cumprod() * 100_000
     v = v.reset_index(names="Fecha").melt("Fecha", var_name="Serie", value_name="Valor (USD)")
     ch = alt.Chart(v).mark_line().encode(
@@ -253,13 +253,13 @@ with tabs[1]:
 
     tab = sug["tabla"]
     st.subheader("Embudo de selección de hoy")
-    pasos = pd.DataFrame({"Etapa": ["Universo", "Cumplen ASG", "Salud financiera Buena", "Superan a su índice (Sharpe y alfa)",
+    pasos = pd.DataFrame({"Etapa": ["Universo", "Cumplen ASG", "Salud financiera Buena", "Superan a su índice (Sharpe y alfa)", "Lectura técnica no desfavorable",
                                     f"Candidatas (mejores {sug.get('candidatos_por_mercado', 5)} por mercado)", "En el portafolio"],
                           "Empresas": [len(pre), int((pre["Criterio ASG"] == "Cumple").sum()),
-                                       int(pre["Pasa a bursatilidad"].sum()),
+                                       int(pre["Pasa a bursatilidad"].sum()), int(tab["Supera a su índice"].sum()),
                                        int(tab["Elegible"].sum()), int(tab["Candidato"].sum()), len(sug["pesos"])]})
     ch = alt.Chart(pasos).mark_bar(color=AZUL).encode(x=alt.X("Empresas:Q"), y=alt.Y("Etapa:N", sort=None, title=None),
-                                                      tooltip=["Etapa", "Empresas"]).properties(height=230)
+                                                      tooltip=["Etapa", "Empresas"]).properties(height=260)
     st.altair_chart(ch + ch.mark_text(align="left", dx=4).encode(text="Empresas:Q"), width="stretch")
 
     st.subheader("Universo completo y motivo de exclusión")
@@ -279,8 +279,8 @@ with tabs[1]:
 # ------------------------------------------------------------------ 3. activos frente a su índice
 with tabs[2]:
     st.subheader("Cada activo frente al índice de su propio mercado")
-    st.markdown("Las empresas de EE. UU. se comparan con el **S&P 500**, las de Taiwán con el **TAIEX** y las de Corea con el "
-                "**KOSPI**, en moneda local y con la tasa libre de riesgo de cada país (últimos 5 años).")
+    st.markdown(f"Las empresas de EE. UU. se comparan con el **S&P 500**, las de Taiwán con el **TAIEX** y las de Corea con el "
+                "**KOSPI**, en moneda local y con la tasa libre de riesgo de cada país (últimos {M.VENTANA_ANIOS} años).")
     ci = pd.DataFrame({
         "Índice": f["Índice local"].map(M.NOMBRE_INDICE), "Rentabilidad del activo": f["Rentabilidad anual"].map(pct),
         "Rentabilidad del índice": f["Rentabilidad del índice"].map(pct), "Sharpe del activo": f["Sharpe"].map(num),
@@ -303,7 +303,8 @@ with tabs[2]:
                 f"- **Bursatilidad:** Sharpe {num(r['Sharpe'])} frente a {num(r['Sharpe del índice'])} del "
                 f"{M.NOMBRE_INDICE.get(r['Índice local'], r['Índice local'])}; alfa de Jensen {pct(r['Alfa de Jensen'])} anual; "
                 f"beta {num(r['Beta local'])} ({'alto riesgo' if r['Alto riesgo'] else 'riesgo moderado'}).\n"
-                f"- **Técnico:** {tk.get('Lectura técnica', 'Sin datos')}"
+                f"- **Técnico:** al seleccionar ({ficha_pdf.fecha_larga(of['fin'])}) {r['Lectura técnica'].lower()}; "
+                f"hoy {tk.get('Lectura técnica', 'Sin datos').lower()}"
                 + (f" · RSI {num(tk.get('RSI 14'), 0)} · {pct(tk.get('Distancia al máximo 52 semanas'))} frente al máximo de 52 semanas"
                    if 'RSI 14' in tk and pd.notna(tk.get('RSI 14')) else "") + ".\n"
                 f"- **En el portafolio:** aporta {pct(r['Contribución al riesgo'])} del riesgo; robustez {pct(r['Robustez'], 0)}.\n"
@@ -319,14 +320,18 @@ with tabs[3]:
 2. **Filtro 1 · salud financiera (fundamentales).** Semáforo de ROA (> 6 %), ROE (> 12 %), liquidez corriente (> 1,5x) y
    endeudamiento (< 50 %). Cada indicador vale 2, 1 o 0 puntos; solo pasan las empresas con promedio ≥ 1,5 (nivel Bueno).
    En bancos y aseguradoras solo cuentan ROA y ROE. También se excluyen PER ≤ 0 y patrimonio negativo.
-3. **Filtro 2 · bursatilidad frente al índice local.** Con 5 años de precios mensuales en moneda local, cada empresa debe tener
+3. **Filtro 2 · bursatilidad frente al índice local.** Con 3 años de precios mensuales en moneda local, cada empresa debe tener
    un Sharpe mayor que el de su índice (S&P 500, TAIEX o KOSPI) y alfa de Jensen positivo. Luego se ordenan, con igual peso, por
-   Sharpe y rentabilidad frente al índice y por PER frente al sector; pasan las 5 mejores de cada mercado.
-4. **Optimización.** Máximo Sharpe de Markowitz en USD, con rentabilidad esperada ½ histórica + ½ CAPM local llevado a USD
+   Sharpe y rentabilidad frente al índice y por PER frente al sector; pasan las 5 mejores de cada mercado (si con ellas la
+   política no es factible, se amplía a las siguientes del ranking).
+4. **Filtro 3 · criterio técnico de compra.** A la fecha de selección se revisan cuatro señales: precio sobre su media móvil de
+   200 días, media de 50 días sobre la de 200, MACD sobre su señal y RSI (14) entre 30 y 70. Con 3 o 4 señales la lectura es
+   Favorable, con 2 Neutral y con 0 o 1 Desfavorable. No se compran acciones con lectura Desfavorable, para no entrar en plena caída.
+5. **Optimización.** Máximo Sharpe de Markowitz en USD, con rentabilidad esperada ½ histórica + ½ CAPM local llevado a USD
    por paridad de tasas, y la política del fondo.
-5. **Robustez.** La optimización se repite en 54 escenarios (3 ventanas × 2 métodos × 3 topes × 3 tasas). El portafolio final
+6. **Robustez.** La optimización se repite en 54 escenarios (3 ventanas de 5, 3 y 2 años × 2 métodos × 3 topes × 3 tasas). El portafolio final
    usa solo activos que aparecen en al menos 80 % de ellos; si no alcanzan, se completa con los siguientes más robustos.
-6. **Rebalanceo.** La selección oficial se renueva cada mes con los datos al cierre del mes anterior; entre revisiones, un peso
+7. **Rebalanceo.** La selección oficial se renueva cada mes con los datos al cierre del mes anterior; entre revisiones, un peso
    se ajusta si se desvía más de 3 puntos o si el activo deja de cumplir un filtro.
 """)
     st.subheader("Verificación del portafolio oficial")

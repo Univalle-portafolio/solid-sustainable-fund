@@ -176,13 +176,13 @@ def generar(res, serie_df, periodos, comp_indices, verif) -> bytes:
     pdf.titulo("7–8. Calificación y política de inversión")
     pdf.parrafo("7. Calificación: no aplica (fondo de renta variable). 8. Política: crecimiento del capital a largo plazo con "
                 "acciones de empresas de Estados Unidos, Taiwán y Corea del Sur que cumplen los criterios ASG, tienen salud "
-                "financiera buena y superan a su índice local. Entre 5 y 10 acciones de 10 % a 20 % cada una; mínimo 50 % en "
+                "financiera buena, superan a su índice local y, al comprarse, no tienen lectura técnica desfavorable (media de 200 y 50 días, MACD y RSI). Entre 5 y 10 acciones de 10 % a 20 % cada una; mínimo 50 % en "
                 "alto riesgo (β local > 1); tecnología ≤ 50 %; Taiwán + Corea ≤ 35 %; energía fósil ≤ 20 %; 5 % en liquidez. "
                 "Sin renta fija, alternativos, derivados ni apalancamiento. Perfil de riesgo: arriesgado (clase 6 de 7). "
                 "Índice de referencia: índice compuesto de los índices locales en USD (S&P 500, TAIEX y KOSPI), ponderado por "
                 "el peso del fondo en cada país.")
 
-    pdf.titulo("9. Evolución de USD 100.000 invertidos hace 5 años (simulación)")
+    pdf.titulo(f"9. Evolución de USD 100.000 invertidos hace {M.VENTANA_ANIOS} años (simulación)")
     pdf.image(_grafico_evolucion(serie_df), x=12, w=186)
 
     pdf.titulo("10–11. Plazos, rentabilidad y volatilidad histórica (simulación)")
@@ -215,13 +215,13 @@ def generar(res, serie_df, periodos, comp_indices, verif) -> bytes:
     pdf.tabla(["Emisor", "Ticker", "País", "Sector", "Peso", "Monto USD", "Robustez"], filas,
               [50, 22, 24, 34, 16, 24, 16], ["L", "L", "L", "L", "R", "R", "R"])
 
-    pdf.titulo("Cada activo frente a su índice local (5 años, moneda local)")
+    pdf.titulo(f"Cada activo frente a su índice local ({M.VENTANA_ANIOS} años, moneda local)")
     filas = [(a, M.NOMBRE_INDICE.get(r["Índice local"], r["Índice local"]), pct(r["Rentabilidad anual"]), pct(r["Rentabilidad del índice"]),
               num(r["Sharpe"]), num(r["Sharpe del índice"]), num(r["Beta local"]), pct(r["Alfa de Jensen"])) for a, r in f.iterrows()]
     pdf.tabla(["Activo", "Índice", "Rent. activo", "Rent. índice", "Sharpe", "Sharpe índ.", "Beta", "Alfa"], filas,
               [26, 22, 24, 24, 20, 22, 20, 28], ["L", "L", "R", "R", "R", "R", "R", "R"])
 
-    pdf.titulo("Indicadores del fondo frente a los índices (simulación de 5 años, USD)")
+    pdf.titulo(f"Indicadores del fondo frente a los índices (simulación de {M.VENTANA_ANIOS} años, USD)")
     cols = list(comp_indices.columns)
     filas = []
     for k in comp_indices.index:
@@ -245,7 +245,7 @@ def generar(res, serie_df, periodos, comp_indices, verif) -> bytes:
             ("16. Revisor fiscal · 17. Defensor del consumidor", "No aplica (ejercicio académico)")])
 
     pdf.titulo("Verificación de la política")
-    pdf.tabla(["Origen", "Regla", "Valor", "Cumple"], [tuple(x) for x in verif.values.tolist()], [26, 100, 44, 16],
+    pdf.tabla(["Origen", "Regla", "Valor", "Cumple"], [tuple(x) for x in verif.values.tolist()], [24, 88, 58, 16],
               ["L", "L", "L", "C"], tam=6.8)
 
     pdf.ln(2)
