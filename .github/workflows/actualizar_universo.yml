@@ -23,8 +23,12 @@ jobs:
         run: python actualizar_universo.py
       - name: Guardar el universo en el repositorio
         run: |
+          cp data/universo.csv /tmp/universo.csv
           git config user.name "actualizador-universo"
           git config user.email "actions@users.noreply.github.com"
+          git fetch origin "$GITHUB_REF_NAME"
+          git checkout -f -B "$GITHUB_REF_NAME" "origin/$GITHUB_REF_NAME"
+          mkdir -p data && cp /tmp/universo.csv data/universo.csv
           git add data/universo.csv
           git diff --cached --quiet || git commit -m "Universo actualizado $(date +%Y-%m-%d)"
-          git push
+          git push origin "$GITHUB_REF_NAME"
