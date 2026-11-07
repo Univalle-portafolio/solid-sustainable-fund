@@ -1,0 +1,9 @@
+streamlit>=1.50
+yfinance>=0.2.54
+pandas>=2.1
+numpy>=1.26
+scipy>=1.11
+openpyxl>=3.1
+altair>=5.0
+matplotlib>=3.8
+fpdf2>=2.7.9
