@@ -1,0 +1,3 @@
+Copie en esta carpeta el archivo del ranking con el nombre:
+    ranking_PER_EEUU_Taiwan_Corea.xlsx
+Debe tener las hojas "Consolidado" (60 empresas) e "Indices" (índice y tasa libre de riesgo de cada mercado).
