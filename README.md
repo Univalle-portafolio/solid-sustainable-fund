@@ -21,6 +21,16 @@ cada vez que alguien la abre. Los precios vienen de Yahoo Finance.
 | `fonts/` | Tipografía para el PDF |
 | `requirements.txt` | Paquetes de Python que instala el servidor |
 
+## Universo automático (sin Excel)
+
+- `universo.py` arma el universo: todas las empresas del S&P 500 (lista vigente de Wikipedia) y las mayores de Taiwán y
+  Corea del Sur, con ROA, ROE, liquidez, deuda/capital, PER, sector e industria descargados de Yahoo Finance.
+- `.github/workflows/actualizar_universo.yml` ejecuta `actualizar_universo.py` cada noche de lunes a viernes y guarda el
+  resultado en `data/universo.csv`. También se puede ejecutar a mano: pestaña **Actions → Actualizar universo de empresas → Run workflow**.
+- La aplicación usa, en este orden: `data/universo.csv` → el ranking en Excel (respaldo) → el botón *Construir universo ahora*.
+- Los filtros sin precios (ASG, salud financiera, PER) se aplican a todo el universo; solo las empresas que pasan descargan
+  precios para la comparación con su índice.
+
 ## Publicarla en internet (gratis, unos 15 minutos)
 
 1. **Cree una cuenta en GitHub** (https://github.com) si no tiene una.

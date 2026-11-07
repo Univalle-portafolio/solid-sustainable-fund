@@ -7,3 +7,5 @@ openpyxl>=3.1
 altair>=5.0
 matplotlib>=3.8
 fpdf2>=2.7.9
+lxml>=5.0
+requests>=2.31

@@ -43,6 +43,23 @@ def ruta_ranking():
     return c[0] if c else None
 
 
+def ruta_universo():
+    for r in (os.path.join(AQUI, "data", "universo.csv"), os.path.join(AQUI, "universo.csv")):
+        if os.path.exists(r):
+            return r
+    return None
+
+
+@st.cache_data(ttl=24 * 3600, show_spinner=False)
+def universo_en_vivo(dia: str):
+    """Construye el universo desde la aplicación (solo si aún no existe data/universo.csv). Tarda varios minutos."""
+    import universo as U
+    barra = st.progress(0.0, text="Descargando fundamentales del universo…")
+    u = U.construir_universo(lambda i, n, t: barra.progress(i / n, text=f"Fundamentales {i}/{n} · {t}"), pausa=0.1)
+    barra.empty()
+    return u
+
+
 @st.cache_data(ttl=3600, show_spinner="Descargando precios de Yahoo Finance…")
 def precios(tickers: tuple, dia: str):
     return M.descargar_precios(list(tickers))
@@ -77,33 +94,47 @@ def ejecutar(clave: str, consol: pd.DataFrame, indices: pd.DataFrame, px: pd.Dat
 st.sidebar.title("Solid & Sustainable")
 st.sidebar.markdown("*Invest with strength, grow with purpose.*")
 st.sidebar.caption("Renta variable · EE. UU., Taiwán y Corea del Sur · Perfil arriesgado")
-archivo = ruta_ranking()
-subido = None
-if archivo is None:
-    st.sidebar.warning("No se encontró el ranking en la carpeta data/.")
-    subido = st.sidebar.file_uploader("Cargue el ranking (hojas Consolidado e Indices)", type="xlsx")
-usar_fund = st.sidebar.toggle("Actualizar fundamentales desde Yahoo Finance", value=False,
-                              help="Reemplaza ROA, ROE, liquidez, deuda/capital y PER del ranking por los más recientes de Yahoo. Tarda cerca de un minuto.")
+dia = pd.Timestamp.today().strftime("%Y-%m-%d")
+r_uni, r_rank = ruta_universo(), ruta_ranking()
+usar_fund, fecha_uni = False, None
+if r_uni:
+    universo, indices, fecha_uni = M.cargar_universo(r_uni)
+    fuente_txt = f"Universo automático: {len(universo)} empresas (S&P 500 + Taiwán + Corea)"
+else:
+    st.sidebar.warning("Aún no existe el universo automático (data/universo.csv).")
+    construir = st.sidebar.button("Construir universo ahora (5 a 10 min)", width="stretch")
+    subido = None if r_rank else st.sidebar.file_uploader("…o cargue un ranking en Excel (hojas Consolidado e Indices)", type="xlsx")
+    if construir or st.session_state.get("universo_en_vivo"):
+        st.session_state["universo_en_vivo"] = True
+        import universo as U
+        universo, indices, fecha_uni = universo_en_vivo(dia), U.INDICES.copy(), dia
+        fuente_txt = f"Universo construido en la aplicación: {len(universo)} empresas"
+    elif r_rank or subido:
+        universo, indices = M.cargar_ranking(r_rank or subido)
+        fuente_txt = f"Ranking en Excel (respaldo): {len(universo)} empresas"
+        usar_fund = st.sidebar.toggle("Actualizar fundamentales desde Yahoo Finance", value=False,
+                                      help="Reemplaza ROA, ROE, liquidez, deuda/capital y PER del ranking por los más recientes de Yahoo.")
+        if usar_fund:
+            universo = M.aplicar_fundamentales(universo, fundamentales(tuple(universo.index), dia))
+    else:
+        st.title("Solid & Sustainable Equity Fund")
+        st.info("Para iniciar, ejecute la tarea **Actualizar universo de empresas** en la pestaña *Actions* de GitHub "
+                "(crea `data/universo.csv`), o use el botón **Construir universo ahora** de la barra lateral.")
+        st.stop()
 if st.sidebar.button("Actualizar precios ahora", width="stretch"):
     st.cache_data.clear()
 
-fuente = archivo or subido
-if fuente is None:
-    st.title("Solid & Sustainable Equity Fund")
-    st.info("Para iniciar, agregue el archivo del ranking (por ejemplo `ranking_PER_EEUU_Taiwan_Corea.xlsx`) en la raíz del "
-            "repositorio o en la carpeta `data/`, o cárguelo en la barra lateral.")
+# Filtros sin precios (ASG, salud financiera, PER) sobre todo el universo; solo las que pasan van a bursatilidad
+consol, pre = M.prefiltro(universo)
+if consol.empty:
+    st.error("Ninguna empresa del universo pasó los criterios ASG y de salud financiera.")
     st.stop()
-
-consol, indices = M.cargar_ranking(fuente)
-dia = pd.Timestamp.today().strftime("%Y-%m-%d")
 tickers = tuple(list(consol.index) + list(indices["Índice"]) + list(M.FX_YF.values()) + ["^IRX"])
 try:
     px = precios(tickers, dia)
 except Exception as e:
     st.error(f"No fue posible descargar precios de Yahoo Finance ({type(e).__name__}). Intente de nuevo en unos minutos.")
     st.stop()
-if usar_fund:
-    consol = M.aplicar_fundamentales(consol, fundamentales(tuple(consol.index), dia))
 
 clave = hashlib.md5((str(px.index.max()) + str(px.shape) + str(usar_fund) + str(consol.values.tobytes()[:2000])).encode()).hexdigest()
 try:
@@ -116,6 +147,7 @@ of, sug = R["oficial"], R["sugerida"]
 f = of["fondo"]
 st.sidebar.markdown(f"**Precios al:** {ficha_pdf.fecha_larga(R['hoy'])}  \n**Portafolio oficial:** rebalanceo del "
                     f"{ficha_pdf.fecha_larga(R['rebalanceo'])}")
+st.sidebar.caption(fuente_txt + (f" · fundamentales al {ficha_pdf.fecha_larga(pd.Timestamp(fecha_uni))}" if fecha_uni else ""))
 pdf_bytes = ficha_pdf.generar(of, R["serie"], R["periodos"], R["comp"], R["verif"])
 st.sidebar.download_button("Descargar ficha técnica (PDF)", pdf_bytes, file_name="Ficha_tecnica_Solid_Sustainable_Equity_Fund.pdf",
                            mime="application/pdf", width="stretch", type="primary")
@@ -221,18 +253,21 @@ with tabs[1]:
 
     tab = sug["tabla"]
     st.subheader("Embudo de selección de hoy")
-    pasos = pd.DataFrame({"Etapa": ["Universo del ranking", "Cumplen ASG", "Salud financiera Buena", "Superan a su índice (Sharpe y alfa)",
+    pasos = pd.DataFrame({"Etapa": ["Universo", "Cumplen ASG", "Salud financiera Buena", "Superan a su índice (Sharpe y alfa)",
                                     "Candidatas (mejores 5 por mercado)", "En el portafolio"],
-                          "Empresas": [len(tab), int((tab["Criterio ASG"] == "Cumple").sum()),
-                                       int(((tab["Criterio ASG"] == "Cumple") & (tab["Nivel de salud"] == "Bueno")).sum()),
+                          "Empresas": [len(pre), int((pre["Criterio ASG"] == "Cumple").sum()),
+                                       int(pre["Pasa a bursatilidad"].sum()),
                                        int(tab["Elegible"].sum()), int(tab["Candidato"].sum()), len(sug["pesos"])]})
     ch = alt.Chart(pasos).mark_bar(color=AZUL).encode(x=alt.X("Empresas:Q"), y=alt.Y("Etapa:N", sort=None, title=None),
                                                       tooltip=["Etapa", "Empresas"]).properties(height=230)
     st.altair_chart(ch + ch.mark_text(align="left", dx=4).encode(text="Empresas:Q"), width="stretch")
 
     st.subheader("Universo completo y motivo de exclusión")
-    u = tab[["Empresa", "Mercado", "Sector", "Criterio ASG", "Nivel de salud", "Puntaje de salud", "Sharpe", "Sharpe del índice",
-             "Alfa de Jensen", "Puntaje de bursatilidad", "Candidato", "Motivo de exclusión"]].copy()
+    u = pre[["Empresa", "Mercado", "Sector", "Criterio ASG", "Nivel de salud", "Puntaje de salud"]].join(
+        tab[["Sharpe", "Sharpe del índice", "Alfa de Jensen", "Puntaje de bursatilidad", "Candidato", "Motivo de exclusión"]], how="left")
+    u["Motivo de exclusión"] = u["Motivo de exclusión"].fillna(pre["Motivo de exclusión"])
+    u["Candidato"] = u["Candidato"].fillna(False).astype(bool)
+    u = u.sort_values(["Candidato", "Puntaje de bursatilidad"], ascending=False)
     u["Mercado"] = u["Mercado"].map(MERCADO_ES)
     for col in ["Alfa de Jensen"]:
         u[col] = u[col].map(pct)
@@ -278,7 +313,9 @@ with tabs[2]:
 with tabs[3]:
     st.subheader("Cómo se eligen los activos")
     st.markdown("""
-1. **Criterios ASG.** Se excluyen armas controvertidas, tabaco y carbón térmico.
+0. **Universo.** Todas las empresas del S&P 500 y las mayores de las bolsas de Taiwán y Corea del Sur (cerca de 600). Sus
+   fundamentales se descargan de Yahoo Finance cada noche, de modo que cualquier empresa nueva que cumpla los criterios puede entrar.
+1. **Criterios ASG.** Se excluyen armas controvertidas, tabaco y carbón térmico (por nombre, sector e industria).
 2. **Filtro 1 · salud financiera (fundamentales).** Semáforo de ROA (> 6 %), ROE (> 12 %), liquidez corriente (> 1,5x) y
    endeudamiento (< 50 %). Cada indicador vale 2, 1 o 0 puntos; solo pasan las empresas con promedio ≥ 1,5 (nivel Bueno).
    En bancos y aseguradoras solo cuentan ROA y ROE. También se excluyen PER ≤ 0 y patrimonio negativo.
@@ -306,7 +343,7 @@ with tabs[4]:
 - **Evaluación y seguimiento:** cada emisor se revisa antes de la compra; las notas de seguimiento quedan en la ficha.
 - **Gobierno corporativo:** voto informado y diálogo con los emisores.
 """)
-    ex = tab.loc[tab["Criterio ASG"] != "Cumple", ["Empresa", "Mercado", "Criterio ASG"]]
+    ex = pre.loc[pre["Criterio ASG"] != "Cumple", ["Empresa", "Mercado", "Sector", "Criterio ASG"]]
     st.markdown("**Empresas del universo excluidas por ASG**")
     st.dataframe(ex if len(ex) else pd.DataFrame({"Resultado": ["Ninguna empresa del universo cae en las exclusiones."]}),
                  width="stretch")

@@ -45,6 +45,9 @@ ASG = {
     "armas_controvertidas": {},               # tickers de listas oficiales (p. ej., Consejo de Ética de Noruega)
     "palabras_excluidas": {"tobacco": "tabaco", "tabaco": "tabaco", "cigar": "tabaco",
                            "coal": "carbón térmico", "carbón": "carbón térmico"},
+    # Industrias de Yahoo Finance que se excluyen o se revisan cuando el universo se descarga automáticamente
+    "industrias_excluidas": {"tobacco": "tabaco", "thermal coal": "carbón térmico"},
+    "industrias_revision": {"aerospace & defense": "defensa: verificar que no fabrique armas controvertidas"},
     "notas": {"012450.KS": "Defensa convencional, permitida: Hanwha Corp dejó de producir municiones de racimo "
                            "y Noruega revocó su exclusión en 2021."},
 }
@@ -67,6 +70,32 @@ def cargar_ranking(ruta: str):
     consol = pd.read_excel(ruta, sheet_name="Consolidado").set_index("Ticker")
     indices = pd.read_excel(ruta, sheet_name="Indices").set_index("Mercado")
     return consol, indices
+
+
+def cargar_universo(ruta: str):
+    """Universo descargado automáticamente (data/universo.csv). Devuelve el universo, los índices y la fecha de actualización."""
+    import universo as U
+    u = pd.read_csv(ruta, index_col="Ticker")
+    fecha = str(u["Fecha de actualización"].iloc[0]) if "Fecha de actualización" in u else None
+    return u, U.INDICES.copy(), fecha
+
+
+def prefiltro(universo: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Filtros que no necesitan precios (ASG, salud financiera Buena y PER positivo).
+    Devuelve (empresas que siguen, tabla del universo completo con el resultado). La mediana del PER por sector se
+    calcula sobre el universo completo, para que el PER relativo no dependa de qué empresas pasaron el filtro."""
+    d = salud_financiera(universo)
+    d["Criterio ASG"] = criterio_asg(d)
+    per = d["PER (Price/Earnings Ratio)"].where(d["PER (Price/Earnings Ratio)"] > 0)
+    d["Mediana PER del sector"] = per.groupby(d["Sector"]).transform("median")
+    pasa = d["Criterio ASG"].eq("Cumple") & d["Nivel de salud"].eq("Bueno") & (d["PER (Price/Earnings Ratio)"] > 0)
+    motivo = pd.Series("", index=d.index)
+    motivo[d["Criterio ASG"] != "Cumple"] += "ASG: " + d["Criterio ASG"].str.replace("Excluida: ", "", regex=False) + "; "
+    motivo[d["Nivel de salud"] != "Bueno"] += "salud " + d["Nivel de salud"].str.lower() + "; "
+    motivo[~(d["PER (Price/Earnings Ratio)"] > 0)] += "PER no positivo; "
+    d["Motivo de exclusión"] = motivo.str.rstrip("; ")
+    d["Pasa a bursatilidad"] = pasa
+    return universo.loc[pasa].assign(**{"Mediana PER del sector": d.loc[pasa, "Mediana PER del sector"]}), d
 
 
 def descargar_precios(tickers, inicio="2015-01-01", fin=None) -> pd.DataFrame:
@@ -162,13 +191,28 @@ def _puntos(v, bueno, prec, mayor_mejor=True):
 
 def criterio_asg(d: pd.DataFrame) -> pd.Series:
     texto = (d["Empresa"].astype(str) + " " + d["Sector"].astype(str)).str.lower()
+    industria = d["Industria"].fillna("").astype(str).str.lower() if "Industria" in d else pd.Series("", index=d.index)
     asg = pd.Series("Cumple", index=d.index)
     for t, motivo in {**ASG["excluir_tickers"], **{k: "armas controvertidas" for k in ASG["armas_controvertidas"]}}.items():
         if t in asg.index:
             asg[t] = "Excluida: " + motivo
     for pal, motivo in ASG["palabras_excluidas"].items():
         asg[texto.str.contains(pal, regex=False) & asg.eq("Cumple")] = "Excluida: " + motivo
+    for ind, motivo in ASG["industrias_excluidas"].items():
+        asg[industria.str.contains(ind, regex=False) & asg.eq("Cumple")] = "Excluida: " + motivo
     return asg
+
+
+def notas_asg(d: pd.DataFrame) -> pd.Series:
+    """Observaciones ASG que no excluyen (p. ej., defensa convencional) para revisión del comité."""
+    industria = d["Industria"].fillna("").astype(str).str.lower() if "Industria" in d else pd.Series("", index=d.index)
+    n = pd.Series("", index=d.index)
+    for ind, txt in ASG["industrias_revision"].items():
+        n[industria.str.contains(ind, regex=False)] = txt
+    for t, txt in ASG["notas"].items():
+        if t in n.index:
+            n[t] = txt
+    return n
 
 
 def salud_financiera(d: pd.DataFrame) -> pd.DataFrame:
@@ -224,7 +268,8 @@ def evaluar_universo(consol, indices, datos):
     d = salud_financiera(consol)
     d["Criterio ASG"] = criterio_asg(d)
     per = d["PER (Price/Earnings Ratio)"].where(d["PER (Price/Earnings Ratio)"] > 0)
-    d["PER relativo al sector"] = per / per.groupby(d["Sector"]).transform("median")
+    med = d["Mediana PER del sector"] if "Mediana PER del sector" in d else per.groupby(d["Sector"]).transform("median")
+    d["PER relativo al sector"] = per / med
     est = stats_locales(datos, rf_local, list(d.index))
     if est.empty:
         raise ValueError("No hay precios suficientes para comparar las empresas con sus índices. Revise la conexión con Yahoo Finance.")
@@ -389,7 +434,7 @@ def seleccionar(consol, indices, datos):
               "ROA (Retorno Activos)", "ROE (Retorno Capital)", "Ratio Liquidez (Current Ratio)", "Endeudamiento",
               "Nivel de salud", "Puntaje de salud", "Criterio ASG", "Puntaje de bursatilidad", "Alto riesgo"]:
         fondo[c] = tabla.loc[sel, c]
-    fondo["Nota ASG"] = [ASG["notas"].get(a, "") for a in sel]
+    fondo["Nota ASG"] = notas_asg(tabla.loc[sel]).values
 
     resumen = {"E(R) anual": r_p, "Volatilidad anual": s_p, "Sharpe": (r_p - rf) / s_p,
                "VaR 95 % 1 mes (USD)": INVERSION * s_p / np.sqrt(12) * norm.ppf(0.95), "Rf": rf}
