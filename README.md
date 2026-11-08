@@ -1,6 +1,6 @@
-# Solidez Sostenible Renta Variable · aplicación web
+# Solidez Sostenible · Renta Variable — aplicación web
 
-*Invertir con solidez, crecer con propósito.*
+*Invertir con fundamento, crecer con propósito.*
 
 Aplicación que muestra la ficha técnica del fondo y ejecuta el motor de selección de activos con los **precios del momento**
 cada vez que alguien la abre. Los precios vienen de Yahoo Finance.

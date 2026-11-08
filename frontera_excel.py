@@ -4,7 +4,7 @@ Excel de la frontera eficiente (entregable 4 del trabajo final: «Excel con los 
 Hojas:
   Leame         · qué contiene cada hoja y cómo reproducir la frontera con Solver.
   Parametros    · tasa libre de riesgo, liquidez, valor del fondo, Z al 95 % y horizonte del VaR.
-  Rendimientos  · rendimientos mensuales en USD de los 10 activos (últimos 3 años, Yahoo Finance).
+  Rendimientos  · rendimientos mensuales en USD de los activos del fondo (últimos 3 años, Yahoo Finance).
   Estadisticas  · rentabilidad y volatilidad históricas (fórmulas), E(R) del modelo y pesos del fondo.
   Covarianzas   · matriz de covarianzas anualizada y matriz de correlaciones (fórmulas).
   Portafolio    · rentabilidad, volatilidad, Sharpe y VaR del fondo (fórmulas, VaR = N·σ·Z·√t).
@@ -63,7 +63,7 @@ def generar(res: dict, datos: dict) -> bytes:
         ("", NEGRO),
         ("Hojas", Font(name="Arial", size=10, bold=True)),
         ("Parametros: tasa libre de riesgo, liquidez, valor del fondo, Z al 95 % y horizonte del VaR (celdas azules editables).", NEGRO),
-        ("Rendimientos: rendimientos mensuales en USD de los 10 activos del fondo.", NEGRO),
+        (f"Rendimientos: rendimientos mensuales en USD de los {n} activos del fondo.", NEGRO),
         ("Estadisticas: rentabilidad y volatilidad históricas anualizadas (fórmulas), E(R) del modelo y pesos del fondo.", NEGRO),
         ("Covarianzas: matriz de covarianzas anualizada (×12) y matriz de correlaciones, calculadas con fórmulas.", NEGRO),
         ("Portafolio: rentabilidad, volatilidad, Sharpe y VaR del fondo. σp² = Σ Σ wi wj σij (SUMPRODUCT y MMULT).", NEGRO),
@@ -190,7 +190,7 @@ def generar(res: dict, datos: dict) -> bytes:
 
     # ---------------------------------------------------------------- Frontera
     wf = wb.create_sheet("Frontera")
-    wf["A1"], wf["A1"].font = "Frontera eficiente (sin ventas en corto) con los 10 activos del fondo", TIT
+    wf["A1"], wf["A1"].font = f"Frontera eficiente (sin ventas en corto) con los {n} activos del fondo", TIT
     _cab(wf, 3, ["Punto", "Tipo"] + sel + ["Suma de pesos", "Rentabilidad", "Volatilidad", "Sharpe"])
     wf.cell(2, 2, "E(R) →").font = Font(name="Arial", size=9, italic=True)
     for j in range(n):
