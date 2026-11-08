@@ -1,5 +1,5 @@
 """
-Universo de inversión automático del Solid & Sustainable Equity Fund.
+Universo de inversión automático del fondo Solidez Sostenible Renta Variable.
 
   · Estados Unidos: las empresas del S&P 500 (lista vigente, descargada de Wikipedia).
   · Taiwán y Corea del Sur: las mayores empresas de cada bolsa (listas de abajo; se pueden ampliar).
@@ -45,7 +45,8 @@ GICS_ES = {"Information Technology": "Tecnología", "Communication Services": "C
            "Utilities": "Servicios públicos", "Real Estate": "Inmobiliario"}
 
 COLUMNAS = ["Mercado", "Empresa", "Sector", "Industria", "Moneda", "Capitalización (USD)", "PER (Price/Earnings Ratio)",
-            "ROE (Retorno Capital)", "ROA (Retorno Activos)", "Ratio Liquidez (Current Ratio)", "Ratio Deuda/Capital (Debt/Equity)"]
+            "ROE (Retorno Capital)", "ROA (Retorno Activos)", "Ratio Liquidez (Current Ratio)", "Ratio Deuda/Capital (Debt/Equity)",
+            "Q de Tobin (P/VL)", "Dividend yield"]
 
 
 def lista_sp500() -> pd.DataFrame:
@@ -68,6 +69,16 @@ def ficha_yahoo(ticker: str, intentos: int = 3) -> dict | None:
             pass
         time.sleep(1.5 * (k + 1))
     return None
+
+
+def _dividend_yield(info: dict):
+    """Rentabilidad por dividendo como fracción (0,02 = 2 %). Yahoo reporta trailingAnnualDividendYield como fracción
+    y dividendYield en porcentaje."""
+    v = info.get("trailingAnnualDividendYield")
+    if v is not None:
+        return v
+    v = info.get("dividendYield")
+    return None if v is None else v / 100
 
 
 def construir_universo(progreso=None, pausa: float = 0.25, anterior: str | None = None) -> pd.DataFrame:
@@ -109,6 +120,8 @@ def construir_universo(progreso=None, pausa: float = 0.25, anterior: str | None 
             "ROA (Retorno Activos)": info.get("returnOnAssets"),
             "Ratio Liquidez (Current Ratio)": info.get("currentRatio"),
             "Ratio Deuda/Capital (Debt/Equity)": None if de is None else de / 100,   # Yahoo lo reporta en %
+            "Q de Tobin (P/VL)": info.get("priceToBook"),                           # precio / valor en libros
+            "Dividend yield": _dividend_yield(info),
         }
         time.sleep(pausa)
     u = pd.DataFrame.from_dict(filas, orient="index")

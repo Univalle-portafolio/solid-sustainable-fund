@@ -1,5 +1,5 @@
 """
-Solid & Sustainable Equity Fund — aplicación web.
+Solidez Sostenible Renta Variable — aplicación web.
 
 Cada vez que alguien entra, descarga los precios del momento (Yahoo Finance) y ejecuta el motor de selección:
   · Portafolio oficial: selección con datos al último cierre de mes (rebalanceo mensual). Es el de la ficha técnica.
@@ -16,9 +16,10 @@ import pandas as pd
 import streamlit as st
 
 import ficha_pdf
+import frontera_excel
 import motor as M
 
-st.set_page_config(page_title="Solid & Sustainable Equity Fund", page_icon="📈", layout="wide")
+st.set_page_config(page_title="Solidez Sostenible Renta Variable", page_icon="📈", layout="wide")
 AQUI = os.path.dirname(os.path.abspath(__file__))
 MERCADO_ES = {"EEUU": "EE. UU.", "Taiwan": "Taiwán", "Corea": "Corea del Sur"}
 AZUL, ARENA = "#1d5f78", "#c08424"
@@ -70,14 +71,52 @@ def fundamentales(tickers: tuple, dia: str):
     return M.fundamentales_yahoo(list(tickers))
 
 
-@st.cache_data(ttl=3600, show_spinner="Ejecutando el motor de selección (54 escenarios)…")
+def _antes_despues(oficial, d_of, d_hoy, serie):
+    """Compara el portafolio concentrado (método anterior, sin regla de sectores) con el fondo diversificado."""
+    w_c = oficial.get("concentrado")
+    if w_c is None:
+        return None
+    tabla, rf = oficial["tabla"], oficial["rf"]
+    mu, S, _ = M.insumos(tabla, d_of, oficial["rf_local"], list(w_c.index))
+    w_acc = w_c[mu.index] / w_c[mu.index].sum()
+    s_acc = float(np.sqrt(w_acc @ S.values @ w_acc))
+    e_c, s_c = M.ACC * float(w_acc @ mu) + M.PESO_LIQUIDEZ * rf, M.ACC * s_acc
+    fondo_c = pd.DataFrame({"Mercado": tabla.loc[w_c.index, "Mercado"], "Peso": w_c})
+    serie_c = M.serie_fondo_diaria({"pesos": w_c, "fondo": fondo_c, "resumen": {"Rf": rf}}, d_hoy)
+    filas = {}
+    for nombre, e, s, n, sec, mx, sr in [
+        ("Antes: concentrado (máximo Sharpe sin regla de sectores)", e_c, s_c, len(w_c), tabla.loc[w_c.index, "Sector"].nunique(),
+         w_c.groupby(tabla.loc[w_c.index, "Sector"]).sum().max(), serie_c["Fondo"]),
+        ("Ahora: diversificado (5 sectores con igual peso)", oficial["resumen"]["E(R) anual"], oficial["resumen"]["Volatilidad anual"],
+         len(oficial["pesos"]), oficial["fondo"]["Sector"].nunique(), oficial["fondo"].groupby("Sector")["Peso"].sum().max(),
+         serie["Fondo"])]:
+        m = M.metricas(sr, rf)
+        per = M.rentabilidad_por_periodos(sr)
+        filas[nombre] = {"Activos": str(n), "Sectores": str(sec), "Mayor peso en un sector": m_pct(mx),
+                         "Rentabilidad esperada": m_pct(e), "Volatilidad esperada": m_pct(s), "Sharpe esperado": m_num((e - rf) / s),
+                         "VaR 95 % a 1 mes": m_pct(M.var_mensual(s)),
+                         f"Rentabilidad anual histórica ({M.VENTANA_ANIOS} años)": m_pct(m["Rentabilidad anual"]),
+                         "Volatilidad histórica": m_pct(m["Volatilidad anual"]), "Máxima caída histórica": m_pct(m["Máxima caída"]),
+                         "Rentabilidad del último mes": m_pct(per.loc["Rentabilidad del periodo", "Último mes"])}
+    return pd.DataFrame(filas)
+
+
+def m_pct(x):
+    return "—" if pd.isna(x) else f"{x * 100:,.1f} %".replace(".", ",")
+
+
+def m_num(x):
+    return "—" if pd.isna(x) else f"{x:,.2f}".replace(".", ",")
+
+
+@st.cache_data(ttl=3600, show_spinner="Ejecutando el motor: combinaciones de sectores y 54 escenarios (puede tardar un minuto)…")
 def ejecutar(clave: str, consol: pd.DataFrame, indices: pd.DataFrame, px: pd.DataFrame):
     hoy = px.index.max()
     f_reb = M.fecha_rebalanceo(hoy, px.index)
     d_hoy = M.preparar(consol, indices, px)
     d_of = M.preparar(consol, indices, px, f_reb)
     oficial = M.seleccionar(consol, indices, d_of)
-    sugerida = M.seleccionar(consol, indices, d_hoy)
+    sugerida = M.seleccionar(consol, indices, d_hoy, con_robustez=False)
     serie = M.serie_fondo_diaria(oficial, d_hoy)
     comp = pd.DataFrame({c: M.metricas(serie[c], oficial["resumen"]["Rf"], serie["Índice compuesto"]) for c in serie.columns})
     orden = ["Fondo", "Índice compuesto"] + [c for c in comp.columns if c not in ("Fondo", "Índice compuesto")]
@@ -85,14 +124,19 @@ def ejecutar(clave: str, consol: pd.DataFrame, indices: pd.DataFrame, px: pd.Dat
     periodos = M.rentabilidad_por_periodos(serie["Fondo"])
     tec = pd.DataFrame({a: M.tecnico(d_hoy["diario_loc"][a]) if a in d_hoy["diario_loc"] else {"Lectura técnica": "Sin datos"}
                         for a in oficial["fondo"].index}).T
+    try:
+        antes = _antes_despues(oficial, d_of, d_hoy, serie)
+    except Exception:
+        antes = None
     return {"oficial": oficial, "sugerida": sugerida, "serie": serie, "comp": comp, "periodos": periodos, "tec": tec,
-            "cambios": M.comparar_oficial_hoy(oficial, sugerida, d_hoy), "verif": M.verificar(oficial),
-            "verif_hoy": M.verificar(sugerida), "hoy": hoy, "rebalanceo": f_reb}
+            "cambios": M.comparar_oficial_hoy(oficial, sugerida, d_hoy), "verif": M.verificar(oficial, comp),
+            "verif_hoy": M.verificar(sugerida), "hoy": hoy, "rebalanceo": f_reb, "antes_despues": antes,
+            "excel": frontera_excel.generar(oficial, d_of)}
 
 
 # ------------------------------------------------------------------ barra lateral
-st.sidebar.title("Solid & Sustainable")
-st.sidebar.markdown("*Invest with strength, grow with purpose.*")
+st.sidebar.title("Solidez Sostenible")
+st.sidebar.markdown(f"*{M.ESLOGAN}*")
 st.sidebar.caption("Renta variable · EE. UU., Taiwán y Corea del Sur · Perfil arriesgado")
 dia = pd.Timestamp.today().strftime("%Y-%m-%d")
 r_uni, r_rank = ruta_universo(), ruta_ranking()
@@ -117,7 +161,7 @@ else:
         if usar_fund:
             universo = M.aplicar_fundamentales(universo, fundamentales(tuple(universo.index), dia))
     else:
-        st.title("Solid & Sustainable Equity Fund")
+        st.title(M.NOMBRE_FONDO)
         st.info("Para iniciar, ejecute la tarea **Actualizar universo de empresas** en la pestaña *Actions* de GitHub "
                 "(crea `data/universo.csv`), o use el botón **Construir universo ahora** de la barra lateral.")
         st.stop()
@@ -149,23 +193,26 @@ st.sidebar.markdown(f"**Precios al:** {ficha_pdf.fecha_larga(R['hoy'])}  \n**Por
                     f"{ficha_pdf.fecha_larga(R['rebalanceo'])}")
 st.sidebar.caption(fuente_txt + (f" · fundamentales al {ficha_pdf.fecha_larga(pd.Timestamp(fecha_uni))}" if fecha_uni else ""))
 pdf_bytes = ficha_pdf.generar(of, R["serie"], R["periodos"], R["comp"], R["verif"])
-st.sidebar.download_button("Descargar ficha técnica (PDF)", pdf_bytes, file_name="Ficha_tecnica_Solid_Sustainable_Equity_Fund.pdf",
+st.sidebar.download_button("Descargar ficha técnica (PDF)", pdf_bytes, file_name="Ficha_tecnica_Solidez_Sostenible_Renta_Variable.pdf",
                            mime="application/pdf", width="stretch", type="primary")
+st.sidebar.download_button("Descargar frontera eficiente (Excel)", R["excel"], file_name="Frontera_eficiente_Solidez_Sostenible.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", width="stretch")
 st.sidebar.caption("Ejercicio académico · Gestión de Portafolios · Universidad del Valle")
 
 # ------------------------------------------------------------------ encabezado
-st.title("Solid & Sustainable Equity Fund")
-st.markdown("#### *Invest with strength, grow with purpose.*")
+st.title(M.NOMBRE_FONDO)
+st.markdown(f"#### *{M.ESLOGAN}*")
 st.markdown("Invertimos en empresas líderes de **Estados Unidos, Taiwán y Corea del Sur** que cumplen criterios ASG, tienen "
-            "**buena salud financiera** y superan a **su propio índice**. Los pesos se definen con optimización de Markowitz "
-            "y se prueban en 54 escenarios. Los precios se actualizan cada vez que usted entra.")
+            "**buena salud financiera**, superan a **su propio índice** y están en **tendencia alcista de largo plazo** (compramos en los retrocesos). El fondo se "
+            "reparte en **5 sectores con igual peso**; dentro de cada sector los pesos se definen con Markowitz y el riesgo se "
+            "limita a un **VaR mensual de 8 %**. Los precios se actualizan cada vez que usted entra.")
 c = st.columns(5)
 rs = of["resumen"]
 c[0].metric("Rentabilidad esperada", pct(rs["E(R) anual"]))
 c[1].metric("Volatilidad esperada", pct(rs["Volatilidad anual"]))
 c[2].metric("Sharpe esperado", num(rs["Sharpe"]))
-c[3].metric("VaR 95 % · 1 mes", usd(rs["VaR 95 % 1 mes (USD)"]))
-c[4].metric(f"Activos ({f['Mercado'].nunique()} mercados)", f"{len(f)}")
+c[3].metric(f"VaR 95 % · 1 mes ({usd(rs['VaR 95 % 1 mes (USD)'])})", pct(rs["VaR 95 % 1 mes (%)"]))
+c[4].metric("Activos · sectores", f"{len(f)} · {f['Sector'].nunique()}")
 
 n_cambios = (R["cambios"]["Acción sugerida"] != "Mantener").sum()
 if n_cambios:
@@ -174,7 +221,8 @@ if n_cambios:
 else:
     st.success("Con los precios de hoy, el portafolio oficial se mantiene: no hay cambios sugeridos.")
 
-tabs = st.tabs(["Ficha del fondo", "Selección y rebalanceo", "Activos frente a su índice", "Metodología", "Sostenibilidad (ASG)"])
+tabs = st.tabs(["Ficha del fondo", "Selección y rebalanceo", "Activos frente a su índice", "Frontera eficiente", "Metodología",
+                "Sostenibilidad (ASG)"])
 
 # ------------------------------------------------------------------ 1. ficha
 with tabs[0]:
@@ -186,7 +234,8 @@ with tabs[0]:
 |---|---|
 | **Tipo** | Fondo de inversión colectiva abierto, sin pacto de permanencia |
 | **Objetivo** | Crecimiento del capital a largo plazo (más de 5 años) |
-| **Perfil de riesgo** | Arriesgado · clase 6 de 7 por volatilidad |
+| **Perfil de riesgo** | Arriesgado: 95 % en acciones y ≥ 50 % en alto riesgo (β > 1) · VaR 95 % mensual ≤ 8 % |
+| **Asignación** | 5 sectores con igual peso (19 % cada uno), 2 empresas por sector |
 | **Mercados** | Estados Unidos, Taiwán y Corea del Sur |
 | **Índice de referencia** | Índice compuesto: índices locales en USD ponderados por país |
 | **Inversión mínima** | USD 1.000 · saldo mínimo USD 500 · preaviso de 3 días hábiles |
@@ -229,14 +278,18 @@ with tabs[0]:
     with a:
         st.subheader("Rentabilidad y volatilidad por periodo")
         p = R["periodos"].apply(lambda col: col.map(pct))
-        p.index = ["Rentabilidad E.A.", "Volatilidad"]
-        st.dataframe(p, width="stretch")
+        ref = M.rentabilidad_por_periodos(R["serie"]["Índice compuesto"]).loc[["Rentabilidad E.A."]].apply(lambda col: col.map(pct))
+        ref.index = ["Índice compuesto (E.A.)"]
+        st.dataframe(pd.concat([p, ref]), width="stretch")
+        st.caption("Los plazos menores a un año se anualizan (E.A.), como exige el formato de ficha técnica; la fila "
+                   "«Rentabilidad del periodo» muestra la variación efectiva sin anualizar.")
     with b:
         st.subheader("El fondo frente a los índices")
         cm = R["comp"].copy()
         out = pd.DataFrame(index=cm.index, columns=cm.columns, dtype=object)
         for k in cm.index:
-            out.loc[k] = [usd(x) if "USD" in k else (num(x) if k.startswith(("Sharpe", "Beta")) else pct(x)) for x in cm.loc[k]]
+            out.loc[k] = [usd(x) if "USD" in k else (num(x) if k.startswith(("Sharpe", "Beta", "Treynor", "Information")) else pct(x))
+                          for x in cm.loc[k]]
         st.dataframe(out, width="stretch")
     st.caption("Índice compuesto: S&P 500, TAIEX y KOSPI en dólares, ponderados por el peso del fondo en cada país.")
 
@@ -253,8 +306,10 @@ with tabs[1]:
 
     tab = sug["tabla"]
     st.subheader("Embudo de selección de hoy")
-    pasos = pd.DataFrame({"Etapa": ["Universo", "Cumplen ASG", "Salud financiera Buena", "Superan a su índice (Sharpe y alfa)", "Lectura técnica no desfavorable",
-                                    f"Candidatas (mejores {sug.get('candidatos_por_mercado', 5)} por mercado)", "En el portafolio"],
+    pasos = pd.DataFrame({"Etapa": ["Universo", "Cumplen ASG", "Salud financiera Buena", "Superan a su índice (Sharpe y alfa)",
+                                    "Técnico y Q de Tobin (pasan todos los filtros)",
+                                    f"Candidatas (2 mejores de cada sector · {len(sug['sectores_disponibles'])} sectores)",
+                                    "En el portafolio (5 sectores × 2)"],
                           "Empresas": [len(pre), int((pre["Criterio ASG"] == "Cumple").sum()),
                                        int(pre["Pasa a bursatilidad"].sum()), int(tab["Supera a su índice"].sum()),
                                        int(tab["Elegible"].sum()), int(tab["Candidato"].sum()), len(sug["pesos"])]})
@@ -299,7 +354,8 @@ with tabs[2]:
                 f"- **Fundamental:** ROA {pct(r['ROA (Retorno Activos)'])}, ROE {pct(r['ROE (Retorno Capital)'])}"
                 + ("" if financ else f", liquidez {num(r['Ratio Liquidez (Current Ratio)'])}x, endeudamiento {pct(r['Endeudamiento'])}")
                 + f"; salud **{r['Nivel de salud']}**. PER {num(r['PER (Price/Earnings Ratio)'], 1)} "
-                  f"({num(r['PER relativo al sector'])} veces la mediana de su sector).\n"
+                  f"({num(r['PER relativo al sector'])} veces la mediana de su sector); Q de Tobin {num(r.get('Q de Tobin (P/VL)'), 1)} "
+                  f"({num(r.get('Q de Tobin relativa al sector'))} veces su sector); dividend yield {pct(r.get('Dividend yield'))}.\n"
                 f"- **Bursatilidad:** Sharpe {num(r['Sharpe'])} frente a {num(r['Sharpe del índice'])} del "
                 f"{M.NOMBRE_INDICE.get(r['Índice local'], r['Índice local'])}; alfa de Jensen {pct(r['Alfa de Jensen'])} anual; "
                 f"beta {num(r['Beta local'])} ({'alto riesgo' if r['Alto riesgo'] else 'riesgo moderado'}).\n"
@@ -310,40 +366,132 @@ with tabs[2]:
                 f"- **En el portafolio:** aporta {pct(r['Contribución al riesgo'])} del riesgo; robustez {pct(r['Robustez'], 0)}.\n"
                 f"- **ASG:** {r['Criterio ASG']}. {r['Nota ASG']}")
 
-# ------------------------------------------------------------------ 4. metodología
+# ------------------------------------------------------------------ 4. frontera eficiente
 with tabs[3]:
+    fr = of["frontera"]
+    st.subheader("Frontera eficiente de Markowitz")
+    st.markdown("Siguiendo el proceso de *asset allocation* del curso: (1) escogencia de activos, (2) proyección del retorno "
+                "esperado, (3) **frontera eficiente** y (4) selección del portafolio según las restricciones de la política. "
+                "Las fronteras se calculan sin ventas en corto, con rendimientos mensuales en USD de los últimos "
+                f"{M.VENTANA_ANIOS} años y la rentabilidad esperada del modelo (½ histórica + ½ CAPM).")
+    pc, pf = fr["candidatas"]["puntos"], fr["fondo"]["puntos"]
+    capas = []
+    lin = []
+    if len(pc):
+        lin.append(pc[["Volatilidad", "Rentabilidad"]].assign(Serie="Frontera con todas las candidatas"))
+    if len(pf):
+        lin.append(pf[["Volatilidad", "Rentabilidad"]].assign(Serie="Frontera con los 10 activos del fondo"))
+    msc = fr["candidatas"]["max_sharpe"]
+    ymax = max(float(pc["Rentabilidad"].max()) if len(pc) else 0.3, float(f["E(R) anual USD"].max())) * 1.1
+    xcml = min((ymax - of["rf"]) / msc["Sharpe"], msc["Volatilidad"] * 1.8) if msc["Sharpe"] > 0 else msc["Volatilidad"]
+    lin.append(pd.DataFrame({"Volatilidad": [0, xcml], "Rentabilidad": [of["rf"], of["rf"] + msc["Sharpe"] * xcml],
+                             "Serie": "Línea del mercado de capitales"}))
+    lin = pd.concat(lin)
+    escala = alt.Scale(domain=["Frontera con todas las candidatas", "Frontera con los 10 activos del fondo",
+                               "Línea del mercado de capitales"], range=["#9aa9b1", AZUL, "#9aa9b1"])
+    capas.append(alt.Chart(lin).mark_line().encode(
+        x=alt.X("Volatilidad:Q", axis=alt.Axis(format="%"), title="Volatilidad anual (USD)"),
+        y=alt.Y("Rentabilidad:Q", axis=alt.Axis(format="%"), title="Rentabilidad esperada anual"),
+        color=alt.Color("Serie:N", scale=escala, legend=alt.Legend(orient="bottom", title=None, labelLimit=320)),
+        strokeDash=alt.condition(alt.datum.Serie == "Línea del mercado de capitales", alt.value([5, 4]), alt.value([1, 0]))))
+    act = pd.DataFrame({"Activo": f.index, "Empresa": f["Empresa"], "Sector": f["Sector"],
+                        "Volatilidad": f["Volatilidad anual USD"], "Rentabilidad": f["E(R) anual USD"]})
+    capas.append(alt.Chart(act).mark_circle(size=60, color="#5a6f7a").encode(
+        x="Volatilidad:Q", y="Rentabilidad:Q", tooltip=["Activo", "Empresa", "Sector", alt.Tooltip("Volatilidad:Q", format=".1%"),
+                                                         alt.Tooltip("Rentabilidad:Q", format=".1%")]))
+    capas.append(alt.Chart(act).mark_text(align="left", dx=6, fontSize=10, color="#5a6f7a").encode(
+        x="Volatilidad:Q", y="Rentabilidad:Q", text="Activo:N"))
+    w_acc = of["pesos"] / of["pesos"].sum()
+    s_acc = float(np.sqrt(w_acc @ of["S"].loc[w_acc.index, w_acc.index].values @ w_acc))
+    e_acc = float(w_acc @ of["mu"][w_acc.index])
+    pts = pd.DataFrame([
+        {"Portafolio": "Fondo (parte en acciones)", "Volatilidad": s_acc, "Rentabilidad": e_acc, "Sharpe": (e_acc - of["rf"]) / s_acc},
+        {"Portafolio": "Mínima varianza", **{k: fr["fondo"]["min_varianza"][k] for k in ("Volatilidad", "Rentabilidad")},
+         "Sharpe": (fr["fondo"]["min_varianza"]["Rentabilidad"] - of["rf"]) / fr["fondo"]["min_varianza"]["Volatilidad"]},
+        {"Portafolio": "Máximo Sharpe (10 activos)", **{k: fr["fondo"]["max_sharpe"][k] for k in ("Volatilidad", "Rentabilidad", "Sharpe")}},
+        {"Portafolio": "Máximo Sharpe (todas las candidatas)", **{k: msc[k] for k in ("Volatilidad", "Rentabilidad", "Sharpe")}}])
+    forma = alt.Scale(domain=list(pts["Portafolio"]), range=["diamond", "square", "triangle-up", "triangle-up"])
+    colp = alt.Scale(domain=list(pts["Portafolio"]), range=[ARENA, AZUL, AZUL, "#9aa9b1"])
+    capas.append(alt.Chart(pts).mark_point(size=170, filled=True).encode(
+        x="Volatilidad:Q", y="Rentabilidad:Q", shape=alt.Shape("Portafolio:N", scale=forma, legend=alt.Legend(orient="bottom", title=None, labelLimit=320)),
+        color=alt.Color("Portafolio:N", scale=colp, legend=None),
+        tooltip=["Portafolio", alt.Tooltip("Volatilidad:Q", format=".1%"), alt.Tooltip("Rentabilidad:Q", format=".1%"),
+                 alt.Tooltip("Sharpe:Q", format=".2f")]))
+    st.altair_chart(alt.layer(*capas).resolve_scale(color="independent", shape="independent").properties(height=430),
+                    width="stretch")
+    t = pts.copy()
+    t["Volatilidad"], t["Rentabilidad"], t["Sharpe"] = t["Volatilidad"].map(pct), t["Rentabilidad"].map(pct), t["Sharpe"].map(num)
+    st.dataframe(t.set_index("Portafolio"), width="stretch")
+    st.caption("El fondo queda por debajo de la frontera porque la política exige 5 sectores con igual peso, mínimo 5 % por activo, "
+               "≥ 50 % en alto riesgo, Asia ≤ 35 % y VaR ≤ 8 %. Esa distancia es el costo, en Sharpe, de diversificar.")
+    st.download_button("Descargar el Excel con los cálculos de la frontera", R["excel"],
+                       file_name="Frontera_eficiente_Solidez_Sostenible.xlsx",
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+    if R.get("antes_despues") is not None:
+        st.subheader("Antes y después de diversificar por sectores")
+        st.markdown("Mismo universo, mismos filtros y mismos datos. **Antes:** máximo Sharpe con las 5 mejores empresas de cada "
+                    "mercado y pesos de 10 % a 20 % (método anterior). **Ahora:** 5 sectores con igual peso, 2 empresas por sector "
+                    "y VaR ≤ 8 %.")
+        st.dataframe(R["antes_despues"], width="stretch", height=36 * (len(R["antes_despues"]) + 1) + 4)
+
+    st.subheader("Correlaciones en los meses de caída del mercado")
+    cc = of["correlacion_caidas"]
+    st.markdown(f"Correlación de los rendimientos mensuales en USD en los **{of['meses_caida']} meses** en que cayó el índice "
+                f"compuesto. Meta de la política: ≤ {num(M.POLITICA['max_correlacion_caidas'], 1)} entre cada par. "
+                f"Máxima observada: **{num(of['max_correlacion_caidas'])}**"
+                + (f" ({of['par_max_correlacion'][0]} y {of['par_max_correlacion'][1]})." if of["par_max_correlacion"][0] else "."))
+    hm = cc.reset_index(names="A").melt("A", var_name="B", value_name="Correlación")
+    base = alt.Chart(hm).encode(x=alt.X("B:N", sort=list(cc.columns), title=None), y=alt.Y("A:N", sort=list(cc.columns), title=None))
+    st.altair_chart((base.mark_rect().encode(color=alt.Color("Correlación:Q", scale=alt.Scale(domain=[-1, 1], scheme="blueorange"),
+                                                                    legend=alt.Legend(title="ρ")),
+                                             tooltip=["A", "B", alt.Tooltip("Correlación:Q", format=".2f")])
+                     + base.mark_text(fontSize=10).encode(text=alt.Text("Correlación:Q", format=".2f"))).properties(height=380),
+                    width="stretch")
+
+# ------------------------------------------------------------------ 5. metodología
+with tabs[4]:
     st.subheader("Cómo se eligen los activos")
     st.markdown("""
 0. **Universo.** Todas las empresas del S&P 500 y las mayores de las bolsas de Taiwán y Corea del Sur (cerca de 600). Sus
    fundamentales se descargan de Yahoo Finance cada noche, de modo que cualquier empresa nueva que cumpla los criterios puede entrar.
-1. **Criterios ASG.** Se excluyen armas controvertidas, tabaco y carbón térmico (por nombre, sector e industria).
+1. **Criterios ASG.** Se excluyen armas controvertidas, tabaco y carbón térmico (por nombre, sector e industria). Es una
+   restricción de «circunstancias únicas» de la política de inversión (guía AMV).
 2. **Filtro 1 · salud financiera (fundamentales).** Semáforo de ROA (> 6 %), ROE (> 12 %), liquidez corriente (> 1,5x) y
    endeudamiento (< 50 %). Cada indicador vale 2, 1 o 0 puntos; solo pasan las empresas con promedio ≥ 1,5 (nivel Bueno).
-   En bancos y aseguradoras solo cuentan ROA y ROE. También se excluyen PER ≤ 0 y patrimonio negativo.
+   En bancos y aseguradoras solo cuentan ROA y ROE. También se excluyen PER ≤ 0, patrimonio negativo y empresas con una
+   Q de Tobin (precio / valor en libros) mayor a 3 veces la mediana de su sector.
 3. **Filtro 2 · bursatilidad frente al índice local.** Con 3 años de precios mensuales en moneda local, cada empresa debe tener
-   un Sharpe mayor que el de su índice (S&P 500, TAIEX o KOSPI) y alfa de Jensen positivo. Luego se ordenan, con igual peso, por
-   Sharpe y rentabilidad frente al índice y por PER frente al sector; pasan las 5 mejores de cada mercado (si con ellas la
-   política no es factible, se amplía a las siguientes del ranking).
-4. **Filtro 3 · criterio técnico de compra.** A la fecha de selección se revisan cuatro señales: precio sobre su media móvil de
-   200 días, media de 50 días sobre la de 200, MACD sobre su señal y RSI (14) entre 30 y 70. Con 3 o 4 señales la lectura es
-   Favorable, con 2 Neutral y con 0 o 1 Desfavorable. No se compran acciones con lectura Desfavorable, para no entrar en plena caída.
-5. **Optimización.** Máximo Sharpe de Markowitz en USD, con rentabilidad esperada ½ histórica + ½ CAPM local llevado a USD
-   por paridad de tasas, y la política del fondo.
-6. **Robustez.** La optimización se repite en 54 escenarios (3 ventanas de 5, 3 y 2 años × 2 métodos × 3 topes × 3 tasas). El portafolio final
-   usa solo activos que aparecen en al menos 80 % de ellos; si no alcanzan, se completa con los siguientes más robustos.
-7. **Rebalanceo.** La selección oficial se renueva cada mes con los datos al cierre del mes anterior; entre revisiones, un peso
+   un Sharpe mayor que el de su índice (S&P 500, TAIEX o KOSPI) y alfa de Jensen positivo. Se ordenan, con igual peso, por
+   Sharpe y rentabilidad frente al índice y por PER y Q de Tobin frente a su sector. Alto riesgo: β local > 1.
+4. **Filtro 3 · criterio técnico de compra: retroceso dentro de una tendencia alcista.** Condición obligatoria: el precio debe
+   estar sobre su media móvil de 200 días (tendencia de largo plazo alcista). Además se revisan tres señales: media de 50 días
+   sobre la de 200, MACD sobre su señal y RSI (14) entre 30 y 50 (la acción tuvo un retroceso, sin llegar a sobreventa, y se
+   compra a mejor precio). Con 2 o 3 señales la lectura es Favorable, con 1 Neutral y con 0, o con el precio bajo la media de
+   200 días, Desfavorable. No se compran acciones con lectura Desfavorable. El RSI mide impulso, no valoración: si una acción
+   está cara o barata lo indican el PER y la Q de Tobin frente a su sector.
+5. **Asignación por sectores.** En cada sector se toman sus 2 mejores empresas. Se prueban **todas las combinaciones de 5
+   sectores**; cada sector recibe el mismo peso (19 % del fondo) y, dentro del sector, los pesos se fijan con Markowitz (máximo
+   Sharpe, mínimo 5 % por activo). Entre las combinaciones que cumplen la política (≥ 50 % en alto riesgo, Taiwán + Corea ≤ 35 %,
+   VaR 95 % a 1 mes ≤ 8 %) se elige la de **mayor Sharpe**.
+6. **Riesgo.** VaR = N · σ · Z · √t con Z al 95 % y t = 1 mes. La rentabilidad esperada es ½ histórica en USD + ½ CAPM local
+   llevado a USD por paridad de tasas; la matriz de covarianzas usa rendimientos mensuales en USD.
+7. **Robustez.** El proceso se repite en 54 escenarios (ventanas de 5, 3 y 2 años × 2 métodos de rentabilidad × 3 pisos por
+   activo × 3 tasas libres de riesgo) y se informa en cuántos aparece cada activo.
+8. **Rebalanceo.** La selección oficial se renueva cada mes con los datos al cierre del mes anterior; entre revisiones, un peso
    se ajusta si se desvía más de 3 puntos o si el activo deja de cumplir un filtro.
 """)
+    st.markdown(f"En la selección oficial se evaluaron **{of['combinaciones_evaluadas']} combinaciones** de 5 sectores entre "
+                f"{len(of['sectores_disponibles'])} sectores con candidatas; **{of['combinaciones_factibles']}** cumplieron la "
+                f"política. Sectores elegidos: **{', '.join(of['sectores'])}**. La misma combinación ganó en "
+                f"{pct(of['robustez_combinacion'], 0)} de los escenarios de robustez.")
+    if not of["var_cumple"]:
+        st.warning("Ninguna combinación cumplió el VaR de 8 % junto con las demás reglas; se eligió la combinación de menor riesgo.")
     st.subheader("Verificación del portafolio oficial")
     st.dataframe(R["verif"], width="stretch", hide_index=True)
-    if of.get("candidatos_por_mercado", M.CANDIDATOS_POR_MERCADO) > M.CANDIDATOS_POR_MERCADO:
-        st.info(f"Con las {M.CANDIDATOS_POR_MERCADO} mejores de cada mercado la política no era factible; el motor amplió las "
-                f"candidatas a las {of['candidatos_por_mercado']} mejores de cada mercado, en orden del puntaje de bursatilidad.")
-    if of["completados"]:
-        st.info("Se completó con activos de robustez menor a 80 % para cumplir la política: " + ", ".join(of["completados"]))
 
-# ------------------------------------------------------------------ 5. ASG
-with tabs[4]:
+# ------------------------------------------------------------------ 6. ASG
+with tabs[5]:
     st.subheader("Política de sostenibilidad")
     st.markdown("""
 - **Exclusiones:** armas controvertidas (minas, municiones de racimo, químicas y biológicas), tabaco y carbón térmico.
