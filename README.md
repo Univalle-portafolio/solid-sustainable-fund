@@ -24,7 +24,7 @@ cada vez que alguien la abre. Los precios vienen de Yahoo Finance.
 ## Metodología (versión de noviembre de 2026)
 
 1. ASG → 2. salud financiera (fundamentales) → 3. bursatilidad frente al índice local (3 años) → 4. técnico
-   (precio sobre la media de 200 días obligatorio; media de 50, MACD y RSI entre 30 y 50: retroceso en tendencia alcista) → 5. **5 sectores con igual peso (19 % cada uno) × 2 empresas**,
+   (precio sobre la media de 200 días obligatorio; media de 50, MACD y RSI entre 30 y 50: retroceso en tendencia alcista) → 5. **5 sectores con igual peso (19 % cada uno) y hasta 2 empresas por sector** (1 si solo una cumple todo),
    eligiendo entre todas las combinaciones de 5 sectores la de mayor Sharpe que cumpla ≥ 50 % en alto riesgo (β > 1),
    Taiwán + Corea ≤ 35 % y VaR 95 % a 1 mes ≤ 8 % → 6. robustez en 54 escenarios.
 - `frontera_excel.py` genera el Excel de la frontera eficiente (entregable 4) con fórmulas; se descarga desde la aplicación.

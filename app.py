@@ -116,7 +116,10 @@ def ejecutar(clave: str, consol: pd.DataFrame, indices: pd.DataFrame, px: pd.Dat
     d_hoy = M.preparar(consol, indices, px)
     d_of = M.preparar(consol, indices, px, f_reb)
     oficial = M.seleccionar(consol, indices, d_of)
-    sugerida = M.seleccionar(consol, indices, d_hoy, con_robustez=False)
+    try:
+        sugerida, sug_error = M.seleccionar(consol, indices, d_hoy, con_robustez=False), None
+    except ValueError as e:      # con los precios de hoy no se arma un portafolio: se mantiene el oficial
+        sugerida, sug_error = oficial, str(e)
     serie = M.serie_fondo_diaria(oficial, d_hoy)
     comp = pd.DataFrame({c: M.metricas(serie[c], oficial["resumen"]["Rf"], serie["Índice compuesto"]) for c in serie.columns})
     orden = ["Fondo", "Índice compuesto"] + [c for c in comp.columns if c not in ("Fondo", "Índice compuesto")]
@@ -130,7 +133,7 @@ def ejecutar(clave: str, consol: pd.DataFrame, indices: pd.DataFrame, px: pd.Dat
         antes = None
     return {"oficial": oficial, "sugerida": sugerida, "serie": serie, "comp": comp, "periodos": periodos, "tec": tec,
             "cambios": M.comparar_oficial_hoy(oficial, sugerida, d_hoy), "verif": M.verificar(oficial, comp),
-            "verif_hoy": M.verificar(sugerida), "hoy": hoy, "rebalanceo": f_reb, "antes_despues": antes,
+            "verif_hoy": M.verificar(sugerida), "hoy": hoy, "rebalanceo": f_reb, "antes_despues": antes, "sug_error": sug_error,
             "excel": frontera_excel.generar(oficial, d_of)}
 
 
@@ -185,6 +188,11 @@ try:
     R = ejecutar(clave, consol, indices, px)
 except ValueError as e:
     st.error(f"El motor no pudo construir el portafolio: {e}")
+    if isinstance(e, M.SectoresInsuficientes):
+        st.subheader("Diagnóstico por sector")
+        st.markdown("Empresas de cada sector que pasan cada filtro, de forma acumulada (datos del rebalanceo mensual). "
+                    "La última columna debe tener al menos 1 empresa en 5 sectores.")
+        st.dataframe(M.diagnostico_sectores(pre, e.tabla), width="stretch")
     st.stop()
 
 of, sug = R["oficial"], R["sugerida"]
@@ -215,7 +223,10 @@ c[3].metric(f"VaR 95 % · 1 mes ({usd(rs['VaR 95 % 1 mes (USD)'])})", pct(rs["Va
 c[4].metric("Activos · sectores", f"{len(f)} · {f['Sector'].nunique()}")
 
 n_cambios = (R["cambios"]["Acción sugerida"] != "Mantener").sum()
-if n_cambios:
+if R.get("sug_error"):
+    st.info(f"Con los precios de hoy no se puede armar una selección nueva ({R['sug_error']}); se mantiene el portafolio "
+            "oficial del mes. El diagnóstico por sector está en la pestaña *Selección y rebalanceo*.")
+elif n_cambios:
     st.warning(f"**{n_cambios} cambio(s) sugerido(s) frente al portafolio oficial** con los precios de hoy. "
                "Revise la pestaña *Selección y rebalanceo*.")
 else:
@@ -235,7 +246,7 @@ with tabs[0]:
 | **Tipo** | Fondo de inversión colectiva abierto, sin pacto de permanencia |
 | **Objetivo** | Crecimiento del capital a largo plazo (más de 5 años) |
 | **Perfil de riesgo** | Arriesgado: 95 % en acciones y ≥ 50 % en alto riesgo (β > 1) · VaR 95 % mensual ≤ 8 % |
-| **Asignación** | 5 sectores con igual peso (19 % cada uno), 2 empresas por sector |
+| **Asignación** | 5 sectores con igual peso (19 % cada uno), hasta 2 empresas por sector |
 | **Mercados** | Estados Unidos, Taiwán y Corea del Sur |
 | **Índice de referencia** | Índice compuesto: índices locales en USD ponderados por país |
 | **Inversión mínima** | USD 1.000 · saldo mínimo USD 500 · preaviso de 3 días hábiles |
@@ -308,14 +319,19 @@ with tabs[1]:
     st.subheader("Embudo de selección de hoy")
     pasos = pd.DataFrame({"Etapa": ["Universo", "Cumplen ASG", "Salud financiera Buena", "Superan a su índice (Sharpe y alfa)",
                                     "Técnico y Q de Tobin (pasan todos los filtros)",
-                                    f"Candidatas (2 mejores de cada sector · {len(sug['sectores_disponibles'])} sectores)",
-                                    "En el portafolio (5 sectores × 2)"],
+                                    f"Candidatas (hasta 2 por sector · {len(sug['sectores_disponibles'])} sectores)",
+                                    "En el portafolio (5 sectores)"],
                           "Empresas": [len(pre), int((pre["Criterio ASG"] == "Cumple").sum()),
                                        int(pre["Pasa a bursatilidad"].sum()), int(tab["Supera a su índice"].sum()),
                                        int(tab["Elegible"].sum()), int(tab["Candidato"].sum()), len(sug["pesos"])]})
     ch = alt.Chart(pasos).mark_bar(color=AZUL).encode(x=alt.X("Empresas:Q"), y=alt.Y("Etapa:N", sort=None, title=None),
                                                       tooltip=["Etapa", "Empresas"]).properties(height=260)
     st.altair_chart(ch + ch.mark_text(align="left", dx=4).encode(text="Empresas:Q"), width="stretch")
+
+    st.subheader("Diagnóstico por sector")
+    st.markdown("Cuántas empresas de cada sector pasan cada filtro (acumulado) con los precios de hoy, y cuántas quedan en la "
+                "selección sugerida. Cada sector elegido pesa 19 %; si solo una empresa cumple todo, lleva el peso completo.")
+    st.dataframe(M.diagnostico_sectores(pre, tab, sug["sectores"]), width="stretch")
 
     st.subheader("Universo completo y motivo de exclusión")
     u = pre[["Empresa", "Mercado", "Sector", "Criterio ASG", "Nivel de salud", "Puntaje de salud"]].join(
@@ -431,7 +447,7 @@ with tabs[3]:
     if R.get("antes_despues") is not None:
         st.subheader("Antes y después de diversificar por sectores")
         st.markdown("Mismo universo, mismos filtros y mismos datos. **Antes:** máximo Sharpe con las 5 mejores empresas de cada "
-                    "mercado y pesos de 10 % a 20 % (método anterior). **Ahora:** 5 sectores con igual peso, 2 empresas por sector "
+                    "mercado y pesos de 10 % a 20 % (método anterior). **Ahora:** 5 sectores con igual peso, hasta 2 empresas por sector "
                     "y VaR ≤ 8 %.")
         st.dataframe(R["antes_despues"], width="stretch", height=36 * (len(R["antes_despues"]) + 1) + 4)
 
@@ -470,7 +486,8 @@ with tabs[4]:
    compra a mejor precio). Con 2 o 3 señales la lectura es Favorable, con 1 Neutral y con 0, o con el precio bajo la media de
    200 días, Desfavorable. No se compran acciones con lectura Desfavorable. El RSI mide impulso, no valoración: si una acción
    está cara o barata lo indican el PER y la Q de Tobin frente a su sector.
-5. **Asignación por sectores.** En cada sector se toman sus 2 mejores empresas. Se prueban **todas las combinaciones de 5
+5. **Asignación por sectores.** En cada sector se toman sus 2 mejores empresas; si solo una cumple todos los criterios,
+   esa empresa lleva el peso completo del sector (ningún filtro se relaja). Se prueban **todas las combinaciones de 5
    sectores**; cada sector recibe el mismo peso (19 % del fondo) y, dentro del sector, los pesos se fijan con Markowitz (máximo
    Sharpe, mínimo 5 % por activo). Entre las combinaciones que cumplen la política (≥ 50 % en alto riesgo, Taiwán + Corea ≤ 35 %,
    VaR 95 % a 1 mes ≤ 8 %) se elige la de **mayor Sharpe**.

@@ -223,7 +223,7 @@ def generar(res, serie_df, periodos, comp_indices, verif) -> bytes:
                 "acciones de empresas de Estados Unidos, Taiwán y Corea del Sur que cumplen los criterios ASG, tienen salud "
                 "financiera buena, superan a su índice local (Sharpe y alfa de Jensen) y, al comprarse, no tienen lectura técnica "
                 "desfavorable: precio sobre su media de 200 días y retroceso con RSI entre 30 y 50 (media de 50 días y MACD). Asignación: 5 sectores con igual peso "
-                "(19 % cada uno) y sus 2 mejores empresas, ponderadas con Markowitz (máximo Sharpe) y con mínimo 5 % por activo; "
+                "(19 % cada uno) y hasta 2 empresas por sector (si solo una cumple todos los criterios, lleva el peso completo del sector), ponderadas con Markowitz (máximo Sharpe) y con mínimo 5 % por activo; "
                 "de todas las combinaciones de 5 sectores que cumplen la política se elige la de mayor Sharpe. Mínimo 50 % en alto "
                 "riesgo (β local > 1); Taiwán + Corea ≤ 35 %; energía fósil ≤ 20 %; VaR 95 % a 1 mes ≤ 8 %; 5 % en liquidez. Sin "
                 f"renta fija, alternativos, derivados ni apalancamiento. Perfil de riesgo: arriesgado (95 % en acciones y ≥ 50 % "

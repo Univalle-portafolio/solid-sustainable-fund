@@ -8,7 +8,8 @@ Implementa la misma metodología del cuaderno Motor_ajustado_v5:
      frente al índice, PER y Q de Tobin frente a su sector).
   4. Filtro 3: técnico de compra: precio sobre su media de 200 días (obligatorio) y lectura técnica no desfavorable
      (media de 50 sobre la de 200, MACD sobre su señal y RSI entre 30 y 50: retroceso dentro de una tendencia alcista).
-  5. Asignación: 5 sectores con igual peso (19 % cada uno) y sus 2 mejores empresas; entre todas las combinaciones de
+  5. Asignación: 5 sectores con igual peso (19 % cada uno) y sus mejores empresas (hasta 2; si solo una cumple todo,
+     lleva el peso completo del sector); entre todas las combinaciones de
      5 sectores que cumplen la política (alto riesgo, Asia, VaR ≤ 8 %) se elige la de mayor Sharpe, con Markowitz
      dentro de cada sector.
   6. Robustez en 54 escenarios, frontera eficiente y verificación.
@@ -426,14 +427,37 @@ def var_mensual(sigma_anual_fondo: float) -> float:
     return sigma_anual_fondo * Z_95 * np.sqrt(1 / 12)
 
 
+class SectoresInsuficientes(ValueError):
+    """No hay suficientes sectores con empresas que cumplan todos los criterios. Lleva la tabla para el diagnóstico."""
+    def __init__(self, mensaje, tabla):
+        super().__init__(mensaje)
+        self.tabla = tabla
+
+
 def sectores_candidatos(tabla) -> dict:
-    """Sectores con al menos 2 empresas que pasan todos los filtros, y sus 2 mejores por puntaje de bursatilidad."""
+    """Sectores con al menos 1 empresa que pasa todos los filtros, y sus mejores (hasta 2) por puntaje de bursatilidad.
+    Si un sector tiene una sola empresa que cumple todo, esa empresa lleva el peso completo del sector."""
     c = tabla[tabla["Elegible"]].sort_values("Puntaje de bursatilidad", ascending=False)
-    out = {}
-    for s, g in c.groupby("Sector", sort=False):
-        if len(g) >= ACTIVOS_POR_SECTOR:
-            out[s] = list(g.index[:ACTIVOS_POR_SECTOR])
-    return out
+    return {s: list(g.index[:ACTIVOS_POR_SECTOR]) for s, g in c.groupby("Sector", sort=False)}
+
+
+def diagnostico_sectores(pre: pd.DataFrame, tabla: pd.DataFrame | None, sectores_elegidos=()) -> pd.DataFrame:
+    """Cuántas empresas de cada sector pasan cada filtro (acumulado), para ver dónde se quedan."""
+    d = pd.DataFrame({"Universo": pre.groupby("Sector").size(),
+                      "Cumplen ASG": pre[pre["Criterio ASG"] == "Cumple"].groupby("Sector").size(),
+                      "Salud financiera Buena y PER > 0": pre[pre["Pasa a bursatilidad"]].groupby("Sector").size()})
+    if tabla is not None and len(tabla):
+        sup = tabla["Supera a su índice"].fillna(False).astype(bool)
+        q_ok = ~(tabla["Q de Tobin relativa al sector"] > Q_TOBIN_MAX_RELATIVA)
+        d["Superan a su índice"] = tabla[sup].groupby("Sector").size()
+        d["Q de Tobin ≤ 3 veces su sector"] = tabla[sup & q_ok].groupby("Sector").size()
+        d["Cumplen todo (incluido técnico)"] = tabla[tabla["Elegible"]].groupby("Sector").size()
+    d = d.fillna(0).astype(int).sort_values(list(d.columns)[::-1], ascending=False)
+    if "Cumplen todo (incluido técnico)" in d:
+        d["Empresas en el fondo"] = [min(n, ACTIVOS_POR_SECTOR) if s in sectores_elegidos else 0
+                                     for s, n in d["Cumplen todo (incluido técnico)"].items()]
+    d.index.name = "Sector"
+    return d
 
 
 def _optimizar_estructura(tabla, activos, mu, S, rf, piso=None, con_var=True):
@@ -554,8 +578,8 @@ def seleccionar(consol, indices, datos, con_robustez=True):
     tabla, rf_local = evaluar_universo(consol, indices, datos)
     sect = sectores_candidatos(tabla)
     if len(sect) < N_SECTORES:
-        raise ValueError(f"Solo {len(sect)} sectores tienen al menos {ACTIVOS_POR_SECTOR} empresas que cumplen todos los "
-                         f"criterios; se necesitan {N_SECTORES}.")
+        raise SectoresInsuficientes(f"solo {len(sect)} sectores tienen al menos una empresa que cumple todos los criterios "
+                                    f"y la política exige {N_SECTORES}.", tabla)
     cand = [a for s in sect for a in sect[s]]
     tabla["Candidato"] = tabla.index.isin(cand)
     mu, S, rf = insumos(tabla, datos, rf_local, cand)
@@ -649,8 +673,10 @@ def verificar(res, comp=None):
         ("Enunciado", "Principalmente activos extranjeros", "100 % fuera de Colombia", True),
         ("Política", f"{N_SECTORES} sectores con igual peso", f"{len(ps)} sectores de {ps.min():.1%} a {ps.max():.1%}",
          len(ps) == N_SECTORES and ps.max() - ps.min() < 1e-4),
-        ("Política", f"{ACTIVOS_POR_SECTOR} activos por sector", f"{n_por_sector.min()} a {n_por_sector.max()}",
-         bool((n_por_sector == ACTIVOS_POR_SECTOR).all())),
+        ("Política", f"Hasta {ACTIVOS_POR_SECTOR} activos por sector (1 si solo uno cumple todo)",
+         f"{n_por_sector.min()} a {n_por_sector.max()}" + (f" · con 1: {', '.join(n_por_sector[n_por_sector == 1].index)}"
+                                                           if (n_por_sector == 1).any() else ""),
+         bool((n_por_sector >= 1).all() and (n_por_sector <= ACTIVOS_POR_SECTOR).all())),
         ("Política", f"Mínimo {POLITICA['piso_activo'] * 100:.0f} % por activo", f"{w.min():.1%} – {w.max():.1%}",
          w.min() >= POLITICA["piso_activo"] - 1e-6),
         ("Política", "Taiwán + Corea ≤ 35 %", f"{asia:.1%}", asia <= POLITICA["max_asia"] + 1e-6),
