@@ -3,7 +3,7 @@ Universo de inversión automático del fondo Solidez Sostenible Renta Variable.
 
   · Estados Unidos: las empresas del S&P 500 (lista vigente, descargada de Wikipedia).
   · Taiwán y Corea del Sur: las mayores empresas de cada bolsa (listas de abajo; se pueden ampliar).
-  · Fundamentales, sector e industria de cada empresa: Yahoo Finance.
+  · Fundamentales, sector, industria y riesgo ASG (Sustainalytics) de cada empresa: Yahoo Finance.
 
 El resultado se guarda en data/universo.csv. La tarea diaria de GitHub (actualizar_universo.py) lo renueva cada noche.
 """
@@ -46,7 +46,7 @@ GICS_ES = {"Information Technology": "Tecnología", "Communication Services": "C
 
 COLUMNAS = ["Mercado", "Empresa", "Sector", "Industria", "Moneda", "Capitalización (USD)", "PER (Price/Earnings Ratio)",
             "ROE (Retorno Capital)", "ROA (Retorno Activos)", "Ratio Liquidez (Current Ratio)", "Ratio Deuda/Capital (Debt/Equity)",
-            "Q de Tobin (P/VL)", "Dividend yield"]
+            "Q de Tobin (P/VL)", "Dividend yield", "Riesgo ASG (Sustainalytics)"]
 
 
 def lista_sp500() -> pd.DataFrame:
@@ -59,15 +59,44 @@ def lista_sp500() -> pd.DataFrame:
 
 
 def ficha_yahoo(ticker: str, intentos: int = 3) -> dict | None:
+    """Información de la empresa en Yahoo Finance. Agrega el ESG Risk Score de Sustainalytics en «_riesgo_asg» si
+    Yahoo lo publica para esa empresa (si no, queda vacío y la empresa no se excluye por ese criterio)."""
     import yfinance as yf
     for k in range(intentos):
         try:
-            info = yf.Ticker(ticker).info
+            tk = yf.Ticker(ticker)
+            info = tk.info
             if info and (info.get("longName") or info.get("shortName")):
+                info = dict(info)
+                info["_riesgo_asg"] = riesgo_asg(tk)
                 return info
         except Exception:
             pass
         time.sleep(1.5 * (k + 1))
+    return None
+
+
+def riesgo_asg(tk):
+    """ESG Risk Score total de Sustainalytics (0 = sin riesgo; 40 o más = severo). Yahoo lo entrega en
+    Ticker.sustainability, en filas o en columnas según la versión de yfinance."""
+    try:
+        s = tk.sustainability
+        if s is None or len(s) == 0:
+            return None
+        for clave in ("totalEsg", "esgScore", "totalESG"):
+            if clave in s.index:
+                v = s.loc[clave]
+                v = v.iloc[0] if hasattr(v, "iloc") else v
+            elif clave in getattr(s, "columns", []):
+                v = s[clave].iloc[0]
+            else:
+                continue
+            if isinstance(v, dict):
+                v = v.get("raw")
+            v = float(v)
+            return v if np.isfinite(v) else None
+    except Exception:
+        return None
     return None
 
 
@@ -122,6 +151,7 @@ def construir_universo(progreso=None, pausa: float = 0.25, anterior: str | None 
             "Ratio Deuda/Capital (Debt/Equity)": None if de is None else de / 100,   # Yahoo lo reporta en %
             "Q de Tobin (P/VL)": info.get("priceToBook"),                           # precio / valor en libros
             "Dividend yield": _dividend_yield(info),
+            "Riesgo ASG (Sustainalytics)": info.get("_riesgo_asg"),
         }
         time.sleep(pausa)
     u = pd.DataFrame.from_dict(filas, orient="index")

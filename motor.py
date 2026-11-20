@@ -14,6 +14,9 @@ Implementa la misma metodología del cuaderno Motor_ajustado_v5:
      dentro de cada sector.
   6. Robustez en 54 escenarios, frontera eficiente y verificación.
 
+El portafolio oficial queda congelado en data/portafolio_oficial.csv (fecha de selección y pesos): la página no lo
+recalcula al entrar; solo hace seguimiento con los precios del día (revisión trimestral, ver `seguimiento`).
+
 Todas las funciones reciben los datos como argumentos: no dependen de Streamlit y se pueden probar solas.
 """
 from __future__ import annotations
@@ -41,6 +44,10 @@ ACTIVOS_POR_SECTOR = 2                    # mejores empresas de cada sector
 RSI_RANGO = (30, 50)                      # retroceso dentro de la tendencia alcista (sin sobreventa)
 Q_TOBIN_MAX_RELATIVA = 3.0                # se excluye si la Q de Tobin supera 3 veces la mediana de su sector
 Z_95 = 1.6448536269514722                 # Z al 95 % (VaR = N · σ · Z · √t)
+COMISION = 0.025                          # comisión de administración E.A. (rentabilidad neta = (1 + bruta) / (1 + comisión) − 1)
+RIESGO_ASG_MAX = 40.0                     # ESG Risk Score de Sustainalytics: 40 o más es riesgo «severo» y se excluye
+FECHA_FUERA_DE_MUESTRA = "2023-10-31"     # prueba fuera de muestra: se selecciona con datos hasta esta fecha
+REVISION = "trimestral"                   # revisión de la composición del portafolio oficial
 POLITICA = {
     "min_activos": 5, "max_activos": 10,      # enunciado del trabajo final
     "min_alto_riesgo": 0.50,                  # enunciado: β local > 1
@@ -63,10 +70,25 @@ ASG = {
                            "coal": "carbón térmico", "carbón": "carbón térmico"},
     # Industrias de Yahoo Finance que se excluyen o se revisan cuando el universo se descarga automáticamente
     "industrias_excluidas": {"tobacco": "tabaco", "thermal coal": "carbón térmico"},
-    "industrias_revision": {"aerospace & defense": "defensa: verificar que no fabrique armas controvertidas"},
+    "industrias_revision": {"aerospace & defense": "Sector defensa: el comité debe confirmar que no fabrica armas controvertidas."},
     "notas": {"012450.KS": "Defensa convencional, permitida: Hanwha Corp dejó de producir municiones de racimo "
-                           "y Noruega revocó su exclusión en 2021."},
+                           "y Noruega revocó su exclusión en 2021.",
+              "RTX": "Revisada por el comité: aeroespacial civil (Collins Aerospace, Pratt & Whitney) y defensa "
+                     "convencional (Raytheon). No fabrica las armas que excluye la política (minas antipersonal, "
+                     "municiones de racimo, armas químicas y biológicas). Participa en programas de armas nucleares de "
+                     "EE. UU., por lo que algunos fondos (p. ej., KLP de Noruega) la excluyen; el fondo la mantiene y le "
+                     "hace seguimiento en cada revisión."},
 }
+
+# Notas de análisis que se muestran en la tarjeta del activo (no cambian la selección)
+NOTAS_ANALISIS = {
+    "WELL": "Welltower es un fideicomiso de inversión inmobiliaria (REIT): vive de arrendar inmuebles de salud y vivienda "
+            "para adultos mayores. La depreciación contable de los edificios reduce su utilidad neta, por eso su ROA, su "
+            "ROE y su PER se ven débiles aunque el negocio sea sano. En los REIT se analizan los fondos de operación (FFO: "
+            "utilidad neta + depreciación, sin ganancias por venta de inmuebles) y el precio frente a esos fondos (P/FFO). "
+            "Yahoo Finance no publica el FFO, por eso el semáforo general es exigente con este tipo de empresa.",
+}
+NOMBRES_COMERCIALES = {"WAB": "Wabtec", "2330.TW": "TSMC", "BNY": "BNY Mellon"}
 
 UMBRAL_SALUD = {"ROA": 0.06, "ROE": 0.12, "liq_bueno": 1.5, "liq_prec": 1.0,
                 "end_bueno": 0.50, "end_prec": 0.70, "nivel_bueno": 1.5, "nivel_prec": 1.0}
@@ -96,10 +118,26 @@ def cargar_universo(ruta: str):
     return u, U.INDICES.copy(), fecha
 
 
-def prefiltro(universo: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+def cargar_oficial(ruta: str):
+    """Portafolio oficial congelado (data/portafolio_oficial.csv): columnas Ticker, Peso (sobre el fondo total) y
+    Fecha de selección. Devuelve (pesos, fecha)."""
+    o = pd.read_csv(ruta)
+    o["Ticker"] = o["Ticker"].astype(str).str.strip()
+    pesos = pd.Series(pd.to_numeric(o["Peso"], errors="coerce").values, index=o["Ticker"]).dropna()
+    if pesos.max() > 1:                       # admite pesos en porcentaje (19 en vez de 0,19)
+        pesos = pesos / 100
+    fecha = pd.Timestamp(str(o["Fecha de selección"].dropna().iloc[0]))
+    if abs(pesos.sum() - ACC) > 0.005:
+        raise ValueError(f"Los pesos del portafolio oficial suman {pesos.sum():.1%}; deben sumar {ACC:.0%} "
+                         f"(el {PESO_LIQUIDEZ:.0%} restante es liquidez).")
+    return pesos * ACC / pesos.sum(), fecha
+
+
+def prefiltro(universo: pd.DataFrame, incluir=()) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Filtros que no necesitan precios (ASG, salud financiera Buena y PER positivo).
     Devuelve (empresas que siguen, tabla del universo completo con el resultado). La mediana del PER por sector se
-    calcula sobre el universo completo, para que el PER relativo no dependa de qué empresas pasaron el filtro."""
+    calcula sobre el universo completo, para que el PER relativo no dependa de qué empresas pasaron el filtro.
+    `incluir`: tickers que siguen aunque no pasen (los del portafolio oficial, para hacerles seguimiento)."""
     d = salud_financiera(universo)
     d["Criterio ASG"] = criterio_asg(d)
     per = d["PER (Price/Earnings Ratio)"].where(d["PER (Price/Earnings Ratio)"] > 0)
@@ -114,8 +152,9 @@ def prefiltro(universo: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     motivo[~(d["PER (Price/Earnings Ratio)"] > 0)] += "PER no positivo; "
     d["Motivo de exclusión"] = motivo.str.rstrip("; ")
     d["Pasa a bursatilidad"] = pasa
-    extra = {c: d.loc[pasa, c] for c in ("Mediana PER del sector", "Mediana Q del sector") if c in d}
-    return universo.loc[pasa].assign(**extra), d
+    sigue = pasa | d.index.isin(list(incluir))
+    extra = {c: d.loc[sigue, c] for c in ("Mediana PER del sector", "Mediana Q del sector") if c in d}
+    return universo.loc[sigue].assign(**extra), d
 
 
 def descargar_precios(tickers, inicio="2015-01-01", fin=None) -> pd.DataFrame:
@@ -220,7 +259,20 @@ def criterio_asg(d: pd.DataFrame) -> pd.Series:
         asg[texto.str.contains(pal, regex=False) & asg.eq("Cumple")] = "Excluida: " + motivo
     for ind, motivo in ASG["industrias_excluidas"].items():
         asg[industria.str.contains(ind, regex=False) & asg.eq("Cumple")] = "Excluida: " + motivo
+    if COL_RIESGO_ASG in d:      # ESG Risk Score de Sustainalytics (Yahoo Finance); sin dato no excluye
+        r = pd.to_numeric(d[COL_RIESGO_ASG], errors="coerce")
+        asg[(r >= RIESGO_ASG_MAX) & asg.eq("Cumple")] = f"Excluida: riesgo ASG severo (≥ {RIESGO_ASG_MAX:.0f})"
     return asg
+
+
+COL_RIESGO_ASG = "Riesgo ASG (Sustainalytics)"
+
+
+def nivel_riesgo_asg(v) -> str:
+    """Categorías de Sustainalytics: insignificante (< 10), bajo (10-20), medio (20-30), alto (30-40), severo (≥ 40)."""
+    if pd.isna(v):
+        return "sin dato"
+    return ("insignificante" if v < 10 else "bajo" if v < 20 else "medio" if v < 30 else "alto" if v < 40 else "severo")
 
 
 def notas_asg(d: pd.DataFrame) -> pd.Series:
@@ -247,6 +299,8 @@ def salud_financiera(d: pd.DataFrame) -> pd.DataFrame:
         "Endeudamiento": d["Endeudamiento"].map(lambda v: _puntos(v, u["end_bueno"], u["end_prec"], False)),
     })
     pts.loc[d["Sector"].eq("Servicios financieros"), ["Liquidez", "Endeudamiento"]] = np.nan
+    for c in pts.columns:
+        d[f"Puntos {c}"] = pts[c]
     d["Puntaje de salud"] = pts.mean(axis=1).where(pts.notna().sum(axis=1) >= 2)
     s = d["Puntaje de salud"]
     d["Nivel de salud"] = np.where(s.isna(), "Sin datos", np.where(s >= u["nivel_bueno"], "Bueno",
@@ -573,101 +627,162 @@ def portafolio_concentrado(tabla, datos, rf_local):
     return None
 
 
-def seleccionar(consol, indices, datos, con_robustez=True):
-    """Ejecuta toda la metodología con los datos hasta datos['fin']. Sin robustez es más rápido (selección diaria)."""
-    tabla, rf_local = evaluar_universo(consol, indices, datos)
-    sect = sectores_candidatos(tabla)
-    if len(sect) < N_SECTORES:
-        raise SectoresInsuficientes(f"solo {len(sect)} sectores tienen al menos una empresa que cumple todos los criterios "
-                                    f"y la política exige {N_SECTORES}.", tabla)
-    cand = [a for s in sect for a in sect[s]]
-    tabla["Candidato"] = tabla.index.isin(cand)
-    mu, S, rf = insumos(tabla, datos, rf_local, cand)
-
-    res_c = evaluar_combinaciones(tabla, sect, mu, S, rf, con_var=True)
-    var_cumple = bool(res_c)
-    if not res_c:   # ninguna combinación cumple el VaR: se elige la de menor riesgo entre las que cumplen lo demás
-        res_c = sorted(evaluar_combinaciones(tabla, sect, mu, S, rf, con_var=False), key=lambda x: x[1])
-    if not res_c:
-        raise ValueError("Ninguna combinación de 5 sectores cumple el mínimo de 50 % en alto riesgo y el máximo de 35 % en Asia.")
-    from itertools import combinations
-    n_comb = len(list(combinations(sect, N_SECTORES)))
-    sharpe_b, _, combo, w_fin = res_c[0]
-
-    # Robustez: 3 ventanas × 2 métodos × 3 pisos por activo × 3 tasas = 54 escenarios, sobre las 10 mejores combinaciones
-    top = [c for _, _, c, _ in res_c[:6]]
-    elegidos, misma = [], 0
-    for anios in (VENTANAS_ROBUSTEZ if con_robustez else ()):
+def _robustez_pesos(tabla, sel, datos, rf_local, con_var=True):
+    """Prueba de robustez: 3 ventanas × 2 métodos de rentabilidad × 3 pisos por activo × 3 tasas libres de riesgo = 54
+    escenarios. En cada uno se recalculan los pesos óptimos de los activos del fondo con la misma estructura (sectores con
+    igual peso, alto riesgo, Asia y VaR). Devuelve una tabla escenario × activo con los pesos sobre el fondo total."""
+    filas = []
+    for anios in VENTANAS_ROBUSTEZ:
         for metodo in ("historica", "mezcla"):
             for piso in (0.03, 0.05, 0.07):
                 for drf in (-0.01, 0.0, 0.01):
                     try:
-                        m_, S_, r_ = insumos(tabla, datos, rf_local, cand, anios, metodo, drf)
-                        r = evaluar_combinaciones(tabla, sect, m_, S_, r_, combos=top, piso=piso, con_var=var_cumple)
-                        if r:
-                            elegidos.append(set(r[0][3].index))
-                            misma += r[0][2] == combo
+                        m_, S_, r_ = insumos(tabla, datos, rf_local, sel, anios, metodo, drf)
+                        if len(m_) < len(sel):
+                            continue
+                        w = _optimizar_estructura(tabla, sel, m_, S_, r_, piso=piso, con_var=con_var)
+                        if w is not None:
+                            filas.append(w * ACC)
                     except Exception:
                         pass
-    robustez = pd.Series({a: np.mean([a in e for e in elegidos]) if elegidos else np.nan for a in cand}).sort_values(ascending=False)
+    return pd.DataFrame(filas, columns=sel)
 
-    sel = list(w_fin.index)
-    sel = sorted(sel, key=lambda a: (list(combo).index(tabla.loc[a, "Sector"]), -w_fin[a]))
+
+N_ESCENARIOS = len(VENTANAS_ROBUSTEZ) * 2 * 3 * 3
+
+
+def seleccionar(consol, indices, datos, con_robustez=True, pesos_fijos=None, comparar_metodo_anterior=True):
+    """Ejecuta la metodología con los datos hasta datos['fin'].
+    · Sin `pesos_fijos`: elige los sectores, los activos y los pesos (máximo Sharpe con la política).
+    · Con `pesos_fijos` (Serie ticker → peso sobre el fondo total): usa el portafolio oficial congelado y calcula sus
+      indicadores, la frontera, la robustez y la verificación con los mismos datos."""
+    from itertools import combinations
+    tabla, rf_local = evaluar_universo(consol, indices, datos)
+    sect = sectores_candidatos(tabla)
+    n_comb = len(list(combinations(sect, N_SECTORES))) if len(sect) >= N_SECTORES else 0
+    cand = [a for s in sect for a in sect[s]]
+    tabla["Candidato"] = tabla.index.isin(cand)
+    misma, n_esc_comb, n_fact = 0, 0, np.nan
+
+    if pesos_fijos is None:
+        if len(sect) < N_SECTORES:
+            raise SectoresInsuficientes(f"solo {len(sect)} sectores tienen al menos una empresa que cumple todos los "
+                                        f"criterios y la política exige {N_SECTORES}.", tabla)
+        mu, S, rf = insumos(tabla, datos, rf_local, cand)
+        res_c = evaluar_combinaciones(tabla, sect, mu, S, rf, con_var=True)
+        var_cumple = bool(res_c)
+        if not res_c:   # ninguna combinación cumple el VaR: se elige la de menor riesgo entre las que cumplen lo demás
+            res_c = sorted(evaluar_combinaciones(tabla, sect, mu, S, rf, con_var=False), key=lambda x: x[1])
+        if not res_c:
+            raise ValueError("Ninguna combinación de 5 sectores cumple el mínimo de 50 % en alto riesgo y el máximo de 35 % en Asia.")
+        n_fact = len(res_c)
+        _, _, combo, w_fin = res_c[0]
+        if con_robustez and n_comb > 1:      # ¿gana la misma combinación de sectores en los 54 escenarios?
+            top = [c for _, _, c, _ in res_c[:6]]
+            for anios in VENTANAS_ROBUSTEZ:
+                for metodo in ("historica", "mezcla"):
+                    for piso in (0.03, 0.05, 0.07):
+                        for drf in (-0.01, 0.0, 0.01):
+                            try:
+                                m_, S_, r_ = insumos(tabla, datos, rf_local, cand, anios, metodo, drf)
+                                r = evaluar_combinaciones(tabla, sect, m_, S_, r_, combos=top, piso=piso, con_var=var_cumple)
+                                if r:
+                                    n_esc_comb += 1
+                                    misma += r[0][2] == combo
+                            except Exception:
+                                pass
+    else:
+        faltan = [a for a in pesos_fijos.index if a not in tabla.index]
+        if faltan:
+            raise ValueError(f"No hay datos de {', '.join(faltan)}, del portafolio oficial, en el universo.")
+        todos = list(dict.fromkeys(cand + list(pesos_fijos.index)))
+        mu, S, rf = insumos(tabla, datos, rf_local, todos)
+        faltan = [a for a in pesos_fijos.index if a not in mu.index]
+        if faltan:
+            raise ValueError(f"No hay precios suficientes de {', '.join(faltan)} para la fecha de selección.")
+        w_fin = pesos_fijos / pesos_fijos.sum()
+        combo = tuple(dict.fromkeys(tabla.loc[w_fin.index, "Sector"]))
+        sig = float(np.sqrt(w_fin @ S.loc[w_fin.index, w_fin.index].values @ w_fin))
+        var_cumple = var_mensual(ACC * sig) <= POLITICA["max_var_mensual"] + 1e-6
+
+    sel = sorted(w_fin.index, key=lambda a: (list(combo).index(tabla.loc[a, "Sector"]), -w_fin[a]))
     w_fin = w_fin[sel]
+    rob = _robustez_pesos(tabla, sel, datos, rf_local, var_cumple) if con_robustez else pd.DataFrame(columns=sel)
     S_sel = S.loc[sel, sel]
     sw = S_sel.values @ w_fin.values
     var = float(w_fin @ sw)
     r_acc, s_acc = float(w_fin @ mu[sel]), np.sqrt(var)
     r_p, s_p = ACC * r_acc + PESO_LIQUIDEZ * rf, ACC * s_acc
+    n_sector = tabla.loc[sel, "Sector"].map(tabla.loc[sel, "Sector"].value_counts())
     fondo = pd.DataFrame({
         "Empresa": tabla.loc[sel, "Empresa"], "Mercado": tabla.loc[sel, "Mercado"], "Sector": tabla.loc[sel, "Sector"],
         "Peso": w_fin * ACC, "Monto (USD)": w_fin * ACC * INVERSION,
         "E(R) anual USD": mu[sel], "Volatilidad anual USD": np.sqrt(np.diag(S_sel)),
-        "Contribución al riesgo": w_fin.values * sw / var, "Robustez": robustez.reindex(sel),
+        "Contribución al riesgo": w_fin.values * sw / var,
+        "Peso mínimo (escenarios)": rob.min().reindex(sel) if len(rob) else np.nan,
+        "Peso máximo (escenarios)": rob.max().reindex(sel) if len(rob) else np.nan,
+        "Activos en su sector": n_sector,
+        "Elegibles en su sector": tabla.loc[sel, "Sector"].map(tabla.loc[tabla["Elegible"], "Sector"].value_counts()).fillna(0).astype(int),
     })
-    for c in ["Índice local", "Beta local", "Alfa de Jensen", "t del alfa", "Sharpe", "Sharpe del índice",
+    for c in ["Industria", "Índice local", "Beta local", "Alfa de Jensen", "t del alfa", "Sharpe", "Sharpe del índice",
               "Rentabilidad anual", "Rentabilidad del índice", "PER (Price/Earnings Ratio)", "PER relativo al sector",
               "Q de Tobin (P/VL)", "Q de Tobin relativa al sector", "Dividend yield",
               "ROA (Retorno Activos)", "ROE (Retorno Capital)", "Ratio Liquidez (Current Ratio)", "Endeudamiento",
-              "Nivel de salud", "Puntaje de salud", "Criterio ASG", "Puntaje de bursatilidad", "Alto riesgo",
-              "Lectura técnica"]:
+              "Puntos ROA", "Puntos ROE", "Puntos Liquidez", "Puntos Endeudamiento",
+              "Nivel de salud", "Puntaje de salud", "Criterio ASG", COL_RIESGO_ASG, "Puntaje de bursatilidad", "Alto riesgo",
+              "Lectura técnica", "Elegible", "Motivo de exclusión"]:
         fondo[c] = tabla.loc[sel, c] if c in tabla else np.nan
     fondo["Nota ASG"] = notas_asg(tabla.loc[sel]).values
+    b5 = stats_locales(datos, rf_local, sel, anios=5)
+    fondo["Beta local 5 años"] = b5["Beta local"].reindex(sel) if len(b5) else np.nan
 
+    # Frontera con todas las empresas que pasaron todos los filtros (más las del fondo)
+    eleg = list(dict.fromkeys(list(tabla.index[tabla["Elegible"]]) + sel))
+    mu_e, S_e, _ = insumos(tabla, datos, rf_local, eleg)
     peso_m = fondo.groupby("Mercado")["Peso"].sum().to_dict()
     corr, corr_caidas, max_corr, par_corr, meses_caida = correlacion_en_caidas(datos, sel, peso_m)
-    frontera = {"fondo": frontera_eficiente(mu[sel], S_sel, rf), "candidatas": frontera_eficiente(mu, S, rf)}
-    resumen = {"E(R) anual": r_p, "Volatilidad anual": s_p, "Sharpe": (r_p - rf) / s_p,
-               "VaR 95 % 1 mes (%)": var_mensual(s_p), "VaR 95 % 1 mes (USD)": INVERSION * var_mensual(s_p), "Rf": rf}
-    return {"fin": datos["fin"], "tabla": tabla, "candidatos": cand, "robustez": robustez,
-            "robustos": [a for a in sel if robustez.get(a, 0) >= POLITICA["robustez_minima"]],
-            "completados": [], "pesos": w_fin * ACC, "fondo": fondo, "resumen": resumen, "rf_local": rf_local,
-            "escenarios_validos": len(elegidos), "robustez_combinacion": misma / len(elegidos) if elegidos else np.nan,
+    frontera = {"fondo": frontera_eficiente(mu[sel], S_sel, rf), "candidatas": frontera_eficiente(mu_e, S_e, rf),
+                "n_elegibles": len(mu_e), "mismas_empresas": set(mu_e.index) == set(sel)}
+    alto = float(w_fin[tabla.loc[sel, "Alto riesgo"].astype(bool).values].sum() * ACC)
+    resumen = {"E(R) anual": r_p, "E(R) neta de comisión": (1 + r_p) / (1 + COMISION) - 1,
+               "Volatilidad anual": s_p, "Sharpe": (r_p - rf) / s_p,
+               "VaR 95 % 1 mes (%)": var_mensual(s_p), "VaR 95 % 1 mes (USD)": INVERSION * var_mensual(s_p), "Rf": rf,
+               "Alto riesgo por clase de activo": ACC, "Alto riesgo β > 1": alto}
+    robustez = pd.Series({a: 1.0 if len(rob) else np.nan for a in sel})
+    return {"fin": datos["fin"], "tabla": tabla, "candidatos": cand, "robustez": robustez, "robustez_pesos": rob,
+            "escenarios_validos": len(rob), "escenarios_total": N_ESCENARIOS if con_robustez else 0,
+            "robustos": sel, "completados": [], "pesos": w_fin * ACC, "fondo": fondo, "resumen": resumen,
+            "rf_local": rf_local, "congelado": pesos_fijos is not None,
+            "robustez_combinacion": misma / n_esc_comb if n_esc_comb else np.nan,
             "sectores": list(combo), "sectores_disponibles": sect, "combinaciones_evaluadas": n_comb,
-            "combinaciones_factibles": len(res_c), "var_cumple": var_cumple,
+            "combinaciones_factibles": n_fact, "var_cumple": var_cumple,
             "correlacion": corr, "correlacion_caidas": corr_caidas, "max_correlacion_caidas": max_corr,
             "par_max_correlacion": par_corr, "meses_caida": meses_caida,
             "mu": mu, "S": S, "rf": rf, "frontera": frontera,
-            "concentrado": portafolio_concentrado(tabla, datos, rf_local)}
+            "concentrado": portafolio_concentrado(tabla, datos, rf_local) if comparar_metodo_anterior else None}
 
 
 # ----------------------------------------------------------------------------------------------
 # Verificación, comparación con índices y desempeño histórico
 # ----------------------------------------------------------------------------------------------
-def verificar(res, comp=None):
-    """Tabla de verificación de la política. `comp`: métricas históricas del fondo y del índice compuesto (opcional)."""
+def verificar(res, comp=None, oos=None):
+    """Tabla de verificación de la política. `comp`: métricas históricas del fondo y del índice compuesto (dentro de
+    muestra); `oos`: resultado de `prueba_fuera_de_muestra` (opcional)."""
     f, w = res["fondo"], res["pesos"]
     asia = w[f["Mercado"].isin(["Taiwan", "Corea"])].sum()
     ene = w[f["Sector"] == "Energía"].sum()
     alto = w[f["Alto riesgo"].astype(bool)].sum()
     ps = w.groupby(f["Sector"]).sum()
     n_por_sector = f.groupby("Sector").size()
-    rob = f["Robustez"].min()
     var_p = res["resumen"]["VaR 95 % 1 mes (%)"]
     vol = res["resumen"]["Volatilidad anual"]
     mc = res.get("max_correlacion_caidas", np.nan)
+    par = res.get("par_max_correlacion", (None, None))
     filas = [
-        ("Enunciado", "Mínimo 50 % del fondo en alto riesgo (β local > 1)", f"{alto:.1%}", alto >= POLITICA["min_alto_riesgo"] - 1e-6),
+        ("Enunciado", "Mínimo 50 % en alto riesgo: renta variable (clase de alto riesgo)", f"{w.sum():.1%}",
+         w.sum() >= POLITICA["min_alto_riesgo"] - 1e-6),
+        ("Enunciado", "Además, mínimo 50 % en acciones con β local > 1 (al seleccionar)", f"{alto:.1%}",
+         alto >= POLITICA["min_alto_riesgo"] - 1e-6),
         ("Enunciado", "Entre 5 y 10 activos", str(len(w)), POLITICA["min_activos"] <= len(w) <= POLITICA["max_activos"]),
         ("Enunciado", "Sin activos alternativos", "solo acciones cotizadas", True),
         ("Enunciado", "Principalmente activos extranjeros", "100 % fuera de Colombia", True),
@@ -680,43 +795,51 @@ def verificar(res, comp=None):
         ("Política", f"Mínimo {POLITICA['piso_activo'] * 100:.0f} % por activo", f"{w.min():.1%} – {w.max():.1%}",
          w.min() >= POLITICA["piso_activo"] - 1e-6),
         ("Política", "Taiwán + Corea ≤ 35 %", f"{asia:.1%}", asia <= POLITICA["max_asia"] + 1e-6),
-        ("Riesgo", "VaR 95 % a 1 mes ≤ 8 % (N·σ·Z·√t)", f"{var_p:.1%} (USD {INVERSION * var_p:,.0f})".replace(",", "."),
+        ("Riesgo", "VaR esperado 95 % a 1 mes ≤ 8 % (N·σ·Z·√t)", f"{var_p:.1%} (USD {INVERSION * var_p:,.0f})".replace(",", "."),
          var_p <= POLITICA["max_var_mensual"] + 1e-6),
-        ("Riesgo", "Volatilidad anual (clase 6: 15 % a 25 %)", f"{vol:.1%}",
+        ("Riesgo", "Volatilidad anual esperada (clase 6: 15 % a 25 %)", f"{vol:.1%}",
          True if 0.15 <= vol <= 0.25 else "Informativo"),
-        ("Riesgo", f"Correlación entre pares en meses de caída ≤ {POLITICA['max_correlacion_caidas']:.1f} (meta)".replace(".", ","),
-         "sin datos" if pd.isna(mc) else f"máxima {mc:.2f}".replace(".", ","),
-         True if pd.notna(mc) and mc <= POLITICA["max_correlacion_caidas"] else "Sobre meta"),
     ]
-    if comp is not None and "Fondo" in comp and "Índice compuesto" in comp:
-        sf, si = comp.loc["Sharpe", "Fondo"], comp.loc["Sharpe", "Índice compuesto"]
-        filas.append(("Desempeño", "Sharpe del fondo ≥ Sharpe del índice compuesto (3 años)",
+    if oos is not None and oos.get("comp") is not None:
+        c = oos["comp"]
+        sf, si = c.loc["Sharpe", "Fondo"], c.loc["Sharpe", "Índice compuesto"]
+        filas.append(("Desempeño", f"Fuera de muestra (desde {pd.Timestamp(oos['fecha']).strftime('%m/%Y')}): Sharpe ≥ índice compuesto",
                       f"{sf:.2f} frente a {si:.2f}".replace(".", ","), sf >= si))
+    elif comp is not None and "Fondo" in comp and "Índice compuesto" in comp:
+        sf, si = comp.loc["Sharpe", "Fondo"], comp.loc["Sharpe", "Índice compuesto"]
+        filas.append(("Desempeño", "Sharpe simulado ≥ índice (dentro de muestra, sobrestimado)",
+                      f"{sf:.2f} frente a {si:.2f}".replace(".", ","), "Informativo"))
+    riesgo_asg = pd.to_numeric(f.get(COL_RIESGO_ASG, pd.Series(dtype=float)), errors="coerce")
     filas += [
         ("ASG", "Energía fósil ≤ 20 %", f"{ene:.1%}", ene <= POLITICA["max_energia"] + 1e-6),
         ("ASG", "Sin armas controvertidas, tabaco ni carbón térmico", "todos los activos", (f["Criterio ASG"] == "Cumple").all()),
+        ("ASG", f"Sin riesgo ASG severo (Sustainalytics ≥ {RIESGO_ASG_MAX:.0f})",
+         "sin datos" if riesgo_asg.isna().all() else f"máximo {riesgo_asg.max():.1f}".replace(".", ","),
+         "Sin datos" if riesgo_asg.isna().all() else bool((riesgo_asg.dropna() < RIESGO_ASG_MAX).all())),
         ("Salud financiera", "Todos con nivel Bueno", "todos los activos", (f["Nivel de salud"] == "Bueno").all()),
         ("Bursatilidad", "Sharpe mayor que el de su índice y alfa > 0", "todos los activos",
          bool(((f["Sharpe"] > f["Sharpe del índice"]) & (f["Alfa de Jensen"] > 0)).all())),
         ("Técnico", "Precio sobre media de 200 días y lectura no desfavorable al comprar", "todos los activos",
          bool((f["Lectura técnica"] != TECNICO_EXCLUIDO).all()) if "Lectura técnica" in f else True),
-        ("Robustez", "Cada activo en ≥ 80 % de los escenarios", f"mínimo {rob:.0%}",
-         True if rob >= POLITICA["robustez_minima"] else "Parcial"),
     ]
+    n_ok, n_tot = res.get("escenarios_validos", 0), res.get("escenarios_total", 0)
+    if n_tot:
+        filas.append(("Robustez", "La estructura cumple la política en ≥ 80 % de los escenarios", f"{n_ok} de {n_tot}",
+                      True if n_ok / n_tot >= POLITICA["robustez_minima"] else "Parcial"))
+    filas.append(("Meta", f"Correlación entre pares en meses de caída ≤ {POLITICA['max_correlacion_caidas']:.1f}".replace(".", ","),
+                  "sin datos" if pd.isna(mc) else (f"máxima {mc:.2f}".replace(".", ",") + (f" ({par[0]} y {par[1]})" if par[0] else "")),
+                  True if pd.notna(mc) and mc <= POLITICA["max_correlacion_caidas"] else "Informativo"))
     v = pd.DataFrame(filas, columns=["Origen", "Regla", "Valor", "Cumple"])
     v["Cumple"] = v["Cumple"].map(lambda x: x if isinstance(x, str) else ("Sí" if x else "No"))
     v["Valor"] = v["Valor"].str.replace(r"(\d)\.(\d)%", r"\1,\2 %", regex=True).str.replace(r"(\d)%", r"\1 %", regex=True)
-    if (v["Cumple"] == "Parcial").any():
-        bajos = [a for a in f.index if f.loc[a, "Robustez"] < POLITICA["robustez_minima"]]
-        v.loc[v["Cumple"] == "Parcial", "Valor"] = "menor: " + ", ".join(
-            f"{a} {f.loc[a, 'Robustez']:.0%}".replace("%", " %") for a in bajos[:3])
     return v
 
 
-def serie_fondo_diaria(res, datos, anios=VENTANA_ANIOS):
-    """Simulación diaria en USD del fondo con los pesos fijos (rebalanceo diario aproximado) y de los índices."""
+def serie_fondo_diaria(res, datos, anios=VENTANA_ANIOS, inicio=None):
+    """Simulación diaria en USD del fondo con los pesos fijos (rebalanceo diario aproximado) y de los índices.
+    Con `inicio`, la simulación arranca en esa fecha (prueba fuera de muestra); si no, cubre los últimos `anios` años."""
     d = datos["diario_usd"]
-    d = d[d.index > d.index.max() - pd.DateOffset(years=anios)]
+    d = d[d.index >= pd.Timestamp(inicio)] if inicio is not None else d[d.index > d.index.max() - pd.DateOffset(years=anios)]
     r = d.pct_change(fill_method=None).iloc[1:]
     w = res["pesos"]
     act = [a for a in w.index if a in r.columns]
@@ -740,11 +863,14 @@ def metricas(serie: pd.Series, rf_anual: float, ref: pd.Series | None = None):
     s = serie.dropna()
     v = s.std() * np.sqrt(252)
     acum = (1 + s).prod() - 1
-    anual = (1 + acum) ** (252 / len(s)) - 1 if len(s) else np.nan
+    # Tasa compuesta con días calendario, igual que la tabla de rentabilidad por periodo (el calendario mezcla los días
+    # hábiles de EE. UU. y Taiwán, así que contar 252 días por año subestimaría la rentabilidad anual)
+    dias = (s.index.max() - s.index.min()).days + 1 if len(s) > 1 else np.nan
+    anual = (1 + acum) ** (365 / dias) - 1 if len(s) > 1 else np.nan
     eq = (1 + s).cumprod()
     out = {"Rentabilidad anual": anual, "Volatilidad anual": v, "Sharpe": (anual - rf_anual) / v if v else np.nan,
            "Máxima caída": (eq / eq.cummax() - 1).min(),
-           "VaR 95 % 1 mes (USD)": INVERSION * v / np.sqrt(12) * norm.ppf(0.95)}
+           "VaR histórico 95 % 1 mes (USD)": INVERSION * v / np.sqrt(12) * norm.ppf(0.95)}
     if ref is not None:
         z = pd.concat([s, ref], axis=1).dropna()
         beta = np.cov(z.iloc[:, 0], z.iloc[:, 1])[0, 1] / np.var(z.iloc[:, 1], ddof=1)
@@ -752,7 +878,7 @@ def metricas(serie: pd.Series, rf_anual: float, ref: pd.Series | None = None):
         out["Treynor"] = (anual - rf_anual) / beta if beta else np.nan
         dif = z.iloc[:, 0] - z.iloc[:, 1]
         te = dif.std() * np.sqrt(252)
-        r_ref = (1 + z.iloc[:, 1]).prod() ** (252 / len(z)) - 1
+        r_ref = (1 + z.iloc[:, 1]).prod() ** (365 / dias) - 1
         out["Tracking error"] = te
         out["Information ratio"] = (anual - r_ref) / te if te > 1e-9 else np.nan
     return out
@@ -771,8 +897,21 @@ def nombre_corto(nombre: str, largo: int = 30) -> str:
                r"Holdings?|Group|Company|Co\.)$", "", str(nombre).strip(), flags=re.I)
     s = re.sub(r",?\s+(Inc\.?|Corporation|Corp\.?|Co\.,?\s*Ltd\.?|Ltd\.?|Holdings?)$", "", s, flags=re.I)
     s = s.replace("The ", "", 1) if s.startswith("The ") else s
-    s = s.replace("Taiwan Semiconductor Manufacturing", "TSMC")
+    s = s.replace("Taiwan Semiconductor Manufacturing", "TSMC").replace("Westinghouse Air Brake Technologies", "Wabtec")
     return s if len(s) <= largo else s[: largo - 1] + "…"
+
+
+def mercados_texto(mercados) -> str:
+    """'Estados Unidos y Taiwán' a partir de los códigos de mercado con inversión."""
+    nombres = {"EEUU": "Estados Unidos", "Taiwan": "Taiwán", "Corea": "Corea del Sur"}
+    m = [nombres.get(x, x) for x in ["EEUU", "Taiwan", "Corea"] if x in set(mercados)]
+    return m[0] if len(m) == 1 else ", ".join(m[:-1]) + " y " + m[-1]
+
+
+def indices_texto(mercados) -> str:
+    ix = {"EEUU": "S&P 500", "Taiwan": "TAIEX", "Corea": "KOSPI"}
+    m = [ix[x] for x in ["EEUU", "Taiwan", "Corea"] if x in set(mercados)]
+    return m[0] if len(m) == 1 else ", ".join(m[:-1]) + " y " + m[-1]
 
 
 def rentabilidad_por_periodos(serie: pd.Series):
@@ -789,7 +928,7 @@ def rentabilidad_por_periodos(serie: pd.Series):
         if len(x) < 5:
             filas[k] = {"Rentabilidad E.A.": np.nan, "Rentabilidad del periodo": np.nan, "Volatilidad": np.nan}
             continue
-        dias = (x.index.max() - ini).days
+        dias = (x.index.max() - x.index.min()).days + 1     # misma convención que `metricas`
         acum = (1 + x).prod() - 1
         filas[k] = {"Rentabilidad E.A.": (1 + acum) ** (365 / dias) - 1, "Rentabilidad del periodo": acum,
                     "Volatilidad": x.std() * np.sqrt(252)}
@@ -829,33 +968,54 @@ def fecha_rebalanceo(hoy: pd.Timestamp, indice: pd.DatetimeIndex) -> pd.Timestam
     return previos.max() if len(previos) else indice.min()
 
 
-def comparar_oficial_hoy(oficial, hoy, datos_hoy):
-    """Pesos actuales del portafolio oficial (por movimiento de precios) frente a la selección sugerida hoy."""
+def seguimiento(oficial, datos_hoy, tabla_hoy):
+    """Seguimiento del portafolio oficial congelado con los precios de hoy (no lo cambia):
+    · peso actual de cada activo por movimiento de precios frente a su peso objetivo;
+    · si sigue cumpliendo los criterios fundamentales (ASG, salud financiera y bursatilidad frente a su índice);
+    · acción para la revisión: un activo sale solo si deja de cumplir un criterio fundamental; los pesos se devuelven a
+      su objetivo si se desvían más de 3 puntos. El análisis técnico se usa solo para decidir cuándo comprar."""
     d = datos_hoy["diario_usd"]
     w0 = oficial["pesos"]
     p0 = d.loc[d.index <= oficial["fin"]].iloc[-1]
     p1 = d.iloc[-1]
-    crec = (p1[w0.index] / p0[w0.index]).fillna(1.0)
+    crec = (p1.reindex(w0.index) / p0.reindex(w0.index)).fillna(1.0)
     valor = w0 * crec
-    w_hoy_oficial = valor / (valor.sum() + PESO_LIQUIDEZ)
-    todos = list(dict.fromkeys(list(w0.index) + list(hoy["pesos"].index)))
-    t = pd.DataFrame(index=todos)
-    t["Peso oficial"] = w0.reindex(todos).fillna(0)
-    t["Peso actual (por precios)"] = w_hoy_oficial.reindex(todos).fillna(0)
-    t["Peso sugerido hoy"] = hoy["pesos"].reindex(todos).fillna(0)
-    t["Desviación"] = t["Peso actual (por precios)"] - t["Peso oficial"]
-    tabla_hoy = hoy["tabla"]
+    w_hoy = valor / (valor.sum() + PESO_LIQUIDEZ)
+    t = pd.DataFrame(index=w0.index)
+    t["Empresa"] = oficial["fondo"]["Empresa"].map(nombre_corto)
+    t["Peso objetivo"] = w0
+    t["Peso actual (por precios)"] = w_hoy
+    t["Desviación"] = w_hoy - w0
+    t["Variación del precio (USD)"] = crec - 1
+    t["β > 1 al seleccionar"] = oficial["fondo"]["Alto riesgo"].astype(bool).map({True: "Sí", False: "No"})
+    th = tabla_hoy.reindex(w0.index)
+    t["Lectura técnica hoy"] = th["Lectura técnica"].fillna("Sin datos")
+    motivos = th["Motivo de exclusión"].fillna("sin datos").astype(str).map(
+        lambda m: "; ".join(x for x in m.split("; ") if x and "técnica" not in x))
+    t["Criterios fundamentales hoy"] = motivos.map(lambda m: "Cumple" if m == "" else "No: " + m)
     acc = []
-    for a in todos:
-        en_of, en_hoy = a in w0.index, a in hoy["pesos"].index
-        if en_of and not en_hoy:
-            motivo = tabla_hoy.loc[a, "Motivo de exclusión"] if a in tabla_hoy.index else ""
-            acc.append("Sale" + (f": {motivo}" if motivo else ": ya no está entre los más robustos u óptimos"))
-        elif en_hoy and not en_of:
-            acc.append("Entra")
+    for a in t.index:
+        if motivos[a]:
+            acc.append("Revisar en el comité: " + motivos[a])
         elif abs(t.loc[a, "Desviación"]) > POLITICA["rebalanceo_puntos"]:
-            acc.append("Rebalancear peso")
+            acc.append("Volver al peso objetivo")
         else:
             acc.append("Mantener")
-    t["Acción sugerida"] = acc
-    return t
+    t["Acción"] = acc
+    alto_hoy = float(w_hoy[oficial["fondo"]["Alto riesgo"].astype(bool).reindex(w_hoy.index).values].sum())
+    return t, {"alto_riesgo_hoy": alto_hoy, "renta_variable_hoy": float(w_hoy.sum()), "fecha": d.index.max()}
+
+
+def prueba_fuera_de_muestra(consol, indices, px, fecha=FECHA_FUERA_DE_MUESTRA):
+    """Selecciona con la misma metodología usando solo precios hasta `fecha` y simula ese portafolio desde `fecha` hasta
+    hoy. Limitaciones: los fundamentales (salud financiera, PER, Q de Tobin) y la lista de empresas son los de hoy."""
+    try:
+        d0 = preparar(consol, indices, px, fecha)
+        res0 = seleccionar(consol, indices, d0, con_robustez=False, comparar_metodo_anterior=False)
+        d1 = preparar(consol, indices, px)
+        serie = serie_fondo_diaria(res0, d1, inicio=d0["fin"])
+        comp = pd.DataFrame({c: metricas(serie[c], res0["resumen"]["Rf"], serie["Índice compuesto"]) for c in serie.columns})
+        comp = comp[["Fondo", "Índice compuesto"] + [c for c in comp.columns if c not in ("Fondo", "Índice compuesto")]]
+        return {"fecha": d0["fin"], "res": res0, "serie": serie, "comp": comp, "error": None}
+    except Exception as e:      # p. ej., en esa fecha no había 5 sectores con empresas que cumplieran todo
+        return {"fecha": pd.Timestamp(fecha), "res": None, "serie": None, "comp": None, "error": str(e)}

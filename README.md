@@ -2,13 +2,18 @@
 
 *Invertir con fundamento, crecer con propósito.*
 
-Aplicación que muestra la ficha técnica del fondo y ejecuta el motor de selección de activos con los **precios del momento**
-cada vez que alguien la abre. Los precios vienen de Yahoo Finance.
+Aplicación que muestra la ficha técnica del fondo, el seguimiento del portafolio oficial y la metodología de selección.
+Los precios vienen de Yahoo Finance.
 
-- **Portafolio oficial:** selección con datos al último cierre de mes (rebalanceo mensual). Es el de la ficha técnica.
-- **Selección sugerida hoy:** el mismo motor con los precios de hoy. La aplicación muestra qué activos entrarían o
-  saldrían, qué pesos se desviaron más de 3 puntos y por qué.
-- **Ficha técnica en PDF:** se genera al momento con los datos actualizados (botón en la barra lateral).
+- **Portafolio oficial congelado:** está en `data/portafolio_oficial.csv` (ticker, peso y fecha de selección). La página
+  **no lo recalcula** al entrar: con los datos de la fecha de selección calcula sus indicadores, la frontera, la robustez y
+  la verificación. Para cambiar el portafolio en una revisión trimestral, edite ese archivo (los pesos deben sumar 95 %).
+- **Seguimiento:** con los precios del día muestra cómo se movieron los pesos y si cada activo sigue cumpliendo los criterios
+  fundamentales (ASG, salud financiera y bursatilidad). Un activo sale solo si deja de cumplirlos; el técnico decide cuándo comprar.
+- **Prueba fuera de muestra:** la misma metodología con precios hasta octubre de 2023, simulada hasta hoy (corrige el sesgo
+  de la simulación de 3 años, que usa las mismas fechas con que se escogieron las empresas).
+- **Ficha técnica en PDF y Excel de la frontera:** se generan al momento (botones en la barra lateral). El Excel guarda las
+  fórmulas y sus resultados, tiene hoja CAPM, verificación de la política y una fila con Solver configurado.
 
 ## Archivos
 
@@ -17,9 +22,12 @@ cada vez que alguien la abre. Los precios vienen de Yahoo Finance.
 | `app.py` | La página web (Streamlit) |
 | `motor.py` | El motor de selección: ASG, salud financiera, bursatilidad frente al índice local, Markowitz y robustez. **Aquí se cambian la política y los parámetros** |
 | `ficha_pdf.py` | Genera la ficha técnica en PDF con el formato de la Superintendencia Financiera |
-| `data/` | Aquí va el archivo `ranking_PER_EEUU_Taiwan_Corea.xlsx` |
+| `data/portafolio_oficial.csv` | **Portafolio oficial congelado** (ticker, peso sobre el fondo y fecha de selección) |
+| `data/universo.csv` | Universo con fundamentales y riesgo ASG; lo actualiza cada noche la tarea de GitHub |
+| `frontera_excel.py` | Genera el Excel de la frontera eficiente |
+| `universo.py`, `actualizar_universo.py` | Descargan el universo y sus fundamentales |
 | `fonts/` | Tipografía para el PDF |
-| `requirements.txt` | Paquetes de Python que instala el servidor |
+| `requirements.txt` | Paquetes de Python que instala el servidor (incluye `xlsxwriter`) |
 
 ## Metodología (versión de noviembre de 2026)
 

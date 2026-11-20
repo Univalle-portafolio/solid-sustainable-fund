@@ -1,4 +1,4 @@
-"""Genera la ficha técnica del fondo en PDF (formato de la Superintendencia Financiera, secciones 1 a 17)."""
+"""Genera la ficha técnica del fondo en PDF (formato de la Superintendencia Financiera, secciones 1 a 17 y anexos)."""
 from __future__ import annotations
 
 import io
@@ -47,9 +47,10 @@ MONEDA_ES = {"EEUU": "Dólar (USD)", "Taiwan": "Dólar taiwanés (TWD)", "Corea"
 
 
 class Ficha(FPDF):
-    def __init__(self, fecha):
+    def __init__(self, fecha, fecha_datos=None):
         super().__init__(format="A4")
         self.fecha = fecha
+        self.fecha_datos = fecha_datos if fecha_datos is not None else fecha
         self.add_font("DV", "", FUENTE)
         self.add_font("DV", "B", FUENTE_B)
         self.set_auto_page_break(True, 14)
@@ -66,11 +67,13 @@ class Ficha(FPDF):
         self.set_xy(12, 13.5)
         self.cell(80, 4, M.ESLOGAN)
         self.set_font("DV", "B", 10)
-        self.set_xy(100, 5)
+        self.set_xy(100, 3.8)
         self.cell(98, 5, M.NOMBRE_FONDO, align="R")
-        self.set_font("DV", "", 7)
-        self.set_xy(100, 11)
-        self.cell(98, 4, f"2. Fecha de corte: {fecha_larga(self.fecha)}", align="R")
+        self.set_font("DV", "", 6.8)
+        self.set_xy(100, 9.4)
+        self.cell(98, 3.6, f"2. Fecha de corte (datos de mercado): {fecha_larga(self.fecha_datos)}", align="R")
+        self.set_xy(100, 13.2)
+        self.cell(98, 3.6, f"Composición: portafolio seleccionado con datos al {fecha_larga(self.fecha)}", align="R")
         self.set_text_color(*TINTA)
         self.set_y(24)
 
@@ -81,9 +84,13 @@ class Ficha(FPDF):
         self.cell(0, 4, f"{M.NOMBRE_FONDO} · Ficha técnica · Página {self.page_no()} · "
                         "Ejercicio académico · Gestión de Portafolios · Universidad del Valle", align="C")
 
-    def titulo(self, txt):
-        if self.get_y() > 265:
+    def espacio(self, alto):
+        """Salta de página si el bloque que sigue (título + tabla o gráfico) no cabe completo."""
+        if self.get_y() + alto > 282:
             self.add_page()
+
+    def titulo(self, txt, reserva=12):
+        self.espacio(reserva)
         self.ln(1.5)
         self.set_font("DV", "B", 8.6)
         self.set_text_color(*MAR)
@@ -101,16 +108,21 @@ class Ficha(FPDF):
 
     def tabla(self, cabecera, filas, anchos, alinear=None, tam=7.2):
         alinear = alinear or ["L"] * len(anchos)
-        self.set_font("DV", "B", 6.4)
-        self.set_text_color(*GRIS)
-        for c, w, a in zip(cabecera, anchos, alinear):
-            self.cell(w, 4.6, c.upper(), border="B", align=a)
-        self.ln()
-        self.set_text_color(*TINTA)
-        self.set_font("DV", "", tam)
+
+        def cab():
+            self.set_font("DV", "B", 6.4)
+            self.set_text_color(*GRIS)
+            for c, w, a in zip(cabecera, anchos, alinear):
+                self.cell(w, 4.6, c.upper(), border="B", align=a)
+            self.ln()
+            self.set_text_color(*TINTA)
+
+        self.espacio(4.6 + 4.4 * min(len(filas), 40))     # la tabla no se parte si cabe en una página
+        cab()
         for fila in filas:
             if self.get_y() > 275:
                 self.add_page()
+                cab()
             negrita = isinstance(fila, tuple) and len(fila) and str(fila[0]).startswith("Total")
             self.set_font("DV", "B" if negrita else "", tam)
             for v, w, a in zip(fila, anchos, alinear):
@@ -130,9 +142,17 @@ class Ficha(FPDF):
         self.set_text_color(*TINTA)
 
 
-def _grafico_evolucion(serie_df):
+def _png(fig):
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png")
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+
+def _grafico_evolucion(serie_df, alto=2.3):
     v = (1 + serie_df[["Fondo", "Índice compuesto"] + [c for c in serie_df.columns if c.startswith("S&P")]].fillna(0)).cumprod() * 100_000
-    fig, ax = plt.subplots(figsize=(7.2, 2.3), dpi=200)
+    fig, ax = plt.subplots(figsize=(7.2, alto), dpi=200)
     colores = {"Fondo": "#1d5f78", "Índice compuesto": "#c08424"}
     for c in v.columns:
         ax.plot(v.index, v[c], lw=1.6 if c == "Fondo" else 1.0, color=colores.get(c, "#7a8a93"),
@@ -145,19 +165,17 @@ def _grafico_evolucion(serie_df):
     ax.grid(axis="y", color="#e3e9ec", lw=0.6)
     ax.legend(fontsize=6.5, frameon=False, ncol=3, loc="upper left")
     fig.tight_layout()
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png")
-    plt.close(fig)
-    buf.seek(0)
-    return buf
+    return _png(fig)
 
 
 def _grafico_frontera(res):
     fr = res["frontera"]
-    fig, ax = plt.subplots(figsize=(7.2, 3.0), dpi=200)
+    misma = fr.get("mismas_empresas", False)
+    fig, ax = plt.subplots(figsize=(7.2, 3.3), dpi=200)
     pc, pf = fr["candidatas"]["puntos"], fr["fondo"]["puntos"]
-    if len(pc):
-        ax.plot(pc["Volatilidad"], pc["Rentabilidad"], color="#9aa9b1", lw=1.1, label="Frontera con todas las candidatas")
+    if len(pc) and not misma:
+        ax.plot(pc["Volatilidad"], pc["Rentabilidad"], color="#9aa9b1", lw=1.1,
+                label=f"Frontera con las {fr.get('n_elegibles', len(pc.columns) - 2)} empresas que pasaron los filtros")
     if len(pf):
         ax.plot(pf["Volatilidad"], pf["Rentabilidad"], color="#1d5f78", lw=1.8, label=f"Frontera con los {len(res['fondo'])} activos del fondo")
     rf, ms = fr["candidatas"]["rf"], fr["candidatas"]["max_sharpe"]
@@ -168,7 +186,6 @@ def _grafico_frontera(res):
     ax.scatter(f["Volatilidad anual USD"], f["E(R) anual USD"], s=12, color="#5a6f7a", zorder=3, label="Activos del fondo")
     for a, r in f.iterrows():
         ax.annotate(a, (r["Volatilidad anual USD"], r["E(R) anual USD"]), fontsize=5, xytext=(2, 2), textcoords="offset points")
-    rs = res["resumen"]
     w = res["pesos"] / res["pesos"].sum()
     s_acc = float(np.sqrt(w @ res["S"].loc[w.index, w.index].values @ w))
     ax.scatter([s_acc], [float(w @ res["mu"][w.index])], marker="D", s=40, color="#c08424", zorder=4, label="Fondo (parte en acciones)")
@@ -186,19 +203,19 @@ def _grafico_frontera(res):
     for s in ("top", "right"):
         ax.spines[s].set_visible(False)
     ax.grid(color="#e3e9ec", lw=0.6)
-    ax.legend(fontsize=5.6, frameon=False, ncol=4, loc="upper center", bbox_to_anchor=(0.5, -0.2))
-    fig.tight_layout()
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png")
-    plt.close(fig)
-    buf.seek(0)
-    return buf
+    fig.subplots_adjust(left=0.09, right=0.98, top=0.97, bottom=0.34)
+    ax.legend(fontsize=5.8, frameon=False, ncol=3, loc="upper center", bbox_to_anchor=(0.5, -0.2))
+    return _png(fig)
 
 
-def generar(res, serie_df, periodos, comp_indices, verif) -> bytes:
+def generar(res, serie_df, periodos, comp_indices, verif, oos=None, fecha_datos=None, universo_mercados=None) -> bytes:
     f = res["fondo"]
-    pdf = Ficha(res["fin"])
+    rs = res["resumen"]
+    pdf = Ficha(res["fin"], fecha_datos if fecha_datos is not None else serie_df.index.max())
     pdf.add_page()
+    mercados = list(f.groupby("Mercado")["Peso"].sum().sort_values(ascending=False).index)
+    sin_inv = [MERCADO_ES[m] for m in ("EEUU", "Taiwan", "Corea") if universo_mercados and m in universo_mercados and m not in mercados]
+    monedas = [{"Taiwan": "dólares taiwaneses (TWD)", "Corea": "wones coreanos (KRW)"}.get(m, m) for m in mercados if m != "EEUU"]
 
     pdf.titulo("1–5. Información general")
     pdf.kv([("1. Sociedad administradora", "Equipo Gestión de Portafolios · Universidad del Valle (ejercicio académico)"),
@@ -217,23 +234,34 @@ def generar(res, serie_df, periodos, comp_indices, verif) -> bytes:
             ("6.11–6.14 Comisiones de gestión, éxito, entrada y salida", "No aplica"),
             ("6.17 Gastos totales (estimados)", "2,50 % E.A.")])
 
-    vol = res["resumen"]["Volatilidad anual"]
+    vol = rs["Volatilidad anual"]
     pdf.titulo("7–8. Calificación y política de inversión")
-    pdf.parrafo("7. Calificación: no aplica (fondo de renta variable). 8. Política: crecimiento del capital a largo plazo con "
-                "acciones de empresas de Estados Unidos, Taiwán y Corea del Sur que cumplen los criterios ASG, tienen salud "
-                "financiera buena, superan a su índice local (Sharpe y alfa de Jensen) y, al comprarse, no tienen lectura técnica "
-                "desfavorable: precio sobre su media de 200 días y retroceso con RSI entre 30 y 50 (media de 50 días y MACD). Asignación: 5 sectores con igual peso "
-                "(19 % cada uno) y hasta 2 empresas por sector (si solo una cumple todos los criterios, lleva el peso completo del sector), ponderadas con Markowitz (máximo Sharpe) y con mínimo 5 % por activo; "
-                "de todas las combinaciones de 5 sectores que cumplen la política se elige la de mayor Sharpe. Mínimo 50 % en alto "
-                "riesgo (β local > 1); Taiwán + Corea ≤ 35 %; energía fósil ≤ 20 %; VaR 95 % a 1 mes ≤ 8 %; 5 % en liquidez. Sin "
-                f"renta fija, alternativos, derivados ni apalancamiento. Perfil de riesgo: arriesgado (95 % en acciones y ≥ 50 % "
-                f"en alto riesgo); volatilidad esperada {pct(vol)}, clase {M.clase_riesgo(vol)} de 7. Índice de referencia: "
-                "índice compuesto de los índices locales en USD (S&P 500, TAIEX y KOSPI), ponderado por el peso del fondo en cada país.")
+    pdf.parrafo(
+        "7. Calificación: no aplica (fondo de renta variable). 8. Política: crecimiento del capital a largo plazo con "
+        f"acciones de empresas de {M.mercados_texto(mercados)}"
+        + (f" (el universo analizado incluye también {' y '.join(sin_inv)}; ninguna de sus empresas quedó en el portafolio)" if sin_inv else "")
+        + " que cumplen los criterios ASG (incluido un riesgo ASG no severo según Sustainalytics), tienen salud financiera "
+        "buena, superan a su índice local (Sharpe y alfa de Jensen) y, al comprarse, no tienen lectura técnica desfavorable. "
+        "Asignación: 5 sectores con igual peso (19 % cada uno) y hasta 2 empresas por sector, ponderadas con Markowitz (máximo "
+        "Sharpe) y con mínimo 5 % por activo. Taiwán + Corea ≤ 35 %; energía fósil ≤ 20 %; VaR 95 % a 1 mes ≤ 8 %; 5 % en "
+        "liquidez. Sin renta fija, alternativos, derivados ni apalancamiento. "
+        f"Alto riesgo: el fondo invierte el {pct(rs['Alto riesgo por clase de activo'], 0)} en renta variable, clase de activo "
+        f"de alto riesgo; dentro de las acciones, además, el {pct(rs['Alto riesgo β > 1'])} está en empresas con β > 1, más "
+        f"sensibles al mercado (mínimo 50 % al seleccionar). Perfil de riesgo: arriesgado; volatilidad esperada {pct(vol)}, "
+        f"clase {M.clase_riesgo(vol)} de 7. "
+        + (f"Riesgo cambiario: parte del fondo está en {' y '.join(monedas)}, cuyo valor en USD cambia con la tasa de "
+           "cambio. " if monedas else "")
+        + f"Revisión {M.REVISION} de la composición: un activo sale si deja de cumplir los criterios fundamentales; los pesos "
+        f"vuelven a su objetivo si se desvían más de 3 puntos. Índice de referencia: {M.indices_texto(mercados)} en USD, "
+        "ponderados por el peso del fondo en cada país.")
 
-    pdf.titulo(f"9. Evolución de USD 100.000 invertidos hace {M.VENTANA_ANIOS} años (simulación)")
+    pdf.titulo(f"9. Evolución de USD 100.000 invertidos hace {M.VENTANA_ANIOS} años (simulación)", reserva=60)
     pdf.image(_grafico_evolucion(serie_df), x=12, w=186)
+    pdf.parrafo("Simulación ilustrativa con los pesos actuales: las empresas se seleccionaron con datos de este mismo periodo, "
+                "por lo que el resultado sobrestima la rentabilidad que se habría obtenido en la realidad. La prueba fuera de "
+                "muestra (anexo C) evalúa el método con datos que no se usaron para escoger las empresas.", 6.4, GRIS)
 
-    pdf.titulo("10–11. Plazos, rentabilidad y volatilidad histórica (simulación)")
+    pdf.titulo("10–11. Plazos, rentabilidad y volatilidad histórica (simulación)", reserva=36)
     pdf.parrafo("10. Plazos y duración: no aplica (100 % renta variable, sin vencimiento).", 7.2, GRIS)
     cols = list(periodos.columns)
     ref = M.rentabilidad_por_periodos(serie_df["Índice compuesto"]) if "Índice compuesto" in serie_df else None
@@ -241,11 +269,12 @@ def generar(res, serie_df, periodos, comp_indices, verif) -> bytes:
              ("Rentabilidad del periodo",) + tuple(pct(periodos.loc["Rentabilidad del periodo", c]) for c in cols),
              ("11.2 Volatilidad",) + tuple(pct(periodos.loc["Volatilidad", c]) for c in cols)]
     if ref is not None:
-        filas.append(("Índice compuesto (E.A.)",) + tuple(pct(ref.loc["Rentabilidad E.A.", c]) for c in cols))
+        filas += [("Índice compuesto (E.A.)",) + tuple(pct(ref.loc["Rentabilidad E.A.", c]) for c in cols),
+                  ("Índice compuesto (periodo)",) + tuple(pct(ref.loc["Rentabilidad del periodo", c]) for c in cols)]
     pdf.tabla(["Indicador"] + cols, filas, [36] + [25] * len(cols), ["L"] + ["R"] * len(cols))
     pdf.parrafo("Las rentabilidades de plazos menores a un año se expresan en tasa efectiva anual, como exige el formato; una "
-                "variación de un mes se amplifica al anualizarse. La fila «Rentabilidad del periodo» muestra la variación efectiva "
-                "sin anualizar.", 6.4, GRIS)
+                "variación de un mes se amplifica al anualizarse. Las filas «del periodo» muestran la variación efectiva sin "
+                "anualizar. Rentabilidades brutas, antes de la comisión de administración.", 6.4, GRIS)
 
     pdf.add_page()
     pdf.titulo("12. Composición del fondo")
@@ -255,72 +284,133 @@ def generar(res, serie_df, periodos, comp_indices, verif) -> bytes:
                 f"{pct(M.PESO_LIQUIDEZ)}. 12.6 Por activo: inversiones {pct(f['Peso'].sum())}, disponible {pct(M.PESO_LIQUIDEZ)}. "
                 "12.7 Exposición a derivados: no tiene.", 7.4)
     pdf.ln(1)
-    filas = [(s, pct(p)) for s, p in peso_s.items()]
-    pdf.tabla(["12.3 Sector", "Peso"], filas, [60, 30], ["L", "R"])
+    pdf.tabla(["12.3 Sector", "Peso"], [(s, pct(p)) for s, p in peso_s.items()], [60, 30], ["L", "R"])
     pdf.ln(1)
     pdf.tabla(["12.4 País del emisor", "Peso", "12.5 Moneda"],
               [(MERCADO_ES.get(m, m), pct(p), MONEDA_ES.get(m, m)) for m, p in peso_m.sort_values(ascending=False).items()]
               + [("Liquidez", pct(M.PESO_LIQUIDEZ), "Dólar (USD)")], [60, 30, 60], ["L", "R", "L"])
+    if monedas:
+        pdf.parrafo(f"Riesgo cambiario: {pct(peso_m.drop('EEUU', errors='ignore').sum())} del fondo está en "
+                    f"{' y '.join(monedas)}; su valor en dólares cambia con la tasa de cambio.", 6.4, GRIS)
 
-    pdf.titulo("13. Principales inversiones")
-    filas = [(M.nombre_corto(r["Empresa"], 30), a, MERCADO_ES.get(r["Mercado"], r["Mercado"]), r["Sector"], pct(r["Peso"]),
-              f"{r['Monto (USD)']:,.0f}".replace(",", "."), pct(r["Robustez"], 0)) for a, r in f.iterrows()]
-    filas.append(("Total renta variable", "", "", "", pct(f["Peso"].sum()), f"{f['Monto (USD)'].sum():,.0f}".replace(",", "."), ""))
-    pdf.tabla(["Emisor", "Ticker", "País", "Sector", "Peso", "Monto USD", "Robustez"], filas,
-              [50, 22, 24, 34, 16, 24, 16], ["L", "L", "L", "L", "R", "R", "R"])
+    pdf.titulo("13. Principales inversiones", reserva=50)
+    rango = lambda r: "n. d." if pd.isna(r["Peso mínimo (escenarios)"]) else \
+        f"{pct(r['Peso mínimo (escenarios)'], 0)}–{pct(r['Peso máximo (escenarios)'], 0)}".replace(" %–", "–")
+    filas = [(M.nombre_corto(r["Empresa"], 26), a, MERCADO_ES.get(r["Mercado"], r["Mercado"]), r["Sector"], pct(r["Peso"]),
+              f"{r['Monto (USD)']:,.0f}".replace(",", "."), "Sí" if r["Alto riesgo"] else "No", rango(r)) for a, r in f.iterrows()]
+    filas.append(("Total renta variable", "", "", "", pct(f["Peso"].sum()), f"{f['Monto (USD)'].sum():,.0f}".replace(",", "."), "", ""))
+    pdf.tabla(["Emisor", "Ticker", "País", "Sector", "Peso", "Monto USD", "β > 1", "Escenarios"], filas,
+              [42, 18, 20, 34, 15, 22, 13, 22], ["L", "L", "L", "L", "R", "R", "C", "R"])
+    pdf.parrafo(f"Acciones con β > 1: {pct(rs['Alto riesgo β > 1'])} del fondo. «Escenarios»: rango del peso óptimo del activo "
+                f"en las {res.get('escenarios_total', 0)} pruebas de robustez.", 6.4, GRIS)
 
-    pdf.titulo(f"Cada activo frente a su índice local ({M.VENTANA_ANIOS} años, moneda local)")
-    filas = [(a, M.NOMBRE_INDICE.get(r["Índice local"], r["Índice local"]), pct(r["Rentabilidad anual"]), pct(r["Rentabilidad del índice"]),
-              num(r["Sharpe"]), num(r["Sharpe del índice"]), num(r["Beta local"]), pct(r["Alfa de Jensen"])) for a, r in f.iterrows()]
-    pdf.tabla(["Activo", "Índice", "Rent. activo", "Rent. índice", "Sharpe", "Sharpe índ.", "Beta", "Alfa"], filas,
-              [26, 22, 24, 24, 20, 22, 20, 28], ["L", "L", "R", "R", "R", "R", "R", "R"])
-
-    pdf.titulo(f"Indicadores del fondo frente a los índices (simulación de {M.VENTANA_ANIOS} años, USD)")
-    cols = list(comp_indices.columns)
-    filas = []
-    for k in comp_indices.index:
-        vals = [(f"{v:,.0f}".replace(",", ".") if "USD" in k else (num(v) if k.startswith(("Sharpe", "Beta", "Information")) else pct(v)))
-                for v in comp_indices.loc[k]]
-        filas.append((k,) + tuple(vals))
-    w0 = 186 - 46
-    pdf.tabla(["Indicador"] + cols, filas, [46] + [w0 / len(cols)] * len(cols), ["L"] + ["R"] * len(cols), tam=6.8)
-
-    pdf.titulo("Salud financiera, valoración y ASG de los activos")
-    filas = [(a, pct(r["ROA (Retorno Activos)"]), pct(r["ROE (Retorno Capital)"]),
-              "n. a." if r["Sector"] == "Servicios financieros" else num(r["Ratio Liquidez (Current Ratio)"]) + "x",
-              "n. a." if r["Sector"] == "Servicios financieros" else pct(r["Endeudamiento"]),
-              num(r.get("PER (Price/Earnings Ratio)"), 1), num(r.get("Q de Tobin (P/VL)"), 1), pct(r.get("Dividend yield")),
-              r["Nivel de salud"], r["Criterio ASG"]) for a, r in f.iterrows()]
-    pdf.tabla(["Activo", "ROA", "ROE", "Liquidez", "Endeud.", "PER", "Q Tobin", "Div. yield", "Salud", "ASG"], filas,
-              [22, 17, 17, 17, 17, 15, 16, 18, 20, 27], ["L", "R", "R", "R", "R", "R", "R", "R", "L", "L"], tam=6.8)
-
-    if "frontera" in res:
-        pdf.titulo("Frontera eficiente de Markowitz (sin ventas en corto)")
-        pdf.image(_grafico_frontera(res), x=12, w=186)
-        fr = res["frontera"]["fondo"]
-        rs = res["resumen"]
-        filas = [(f"Mínima varianza ({len(f)} activos)", pct(fr["min_varianza"]["Rentabilidad"]), pct(fr["min_varianza"]["Volatilidad"]),
-                  num((fr["min_varianza"]["Rentabilidad"] - fr["rf"]) / fr["min_varianza"]["Volatilidad"])),
-                 (f"Máximo Sharpe ({len(f)} activos, sin política)", pct(fr["max_sharpe"]["Rentabilidad"]),
-                  pct(fr["max_sharpe"]["Volatilidad"]), num(fr["max_sharpe"]["Sharpe"])),
-                 ("Fondo (con la política)", pct(rs["E(R) anual"]), pct(rs["Volatilidad anual"]), num(rs["Sharpe"]))]
-        pdf.tabla(["Portafolio", "Rentabilidad esperada", "Volatilidad", "Sharpe"], filas, [80, 38, 34, 34], ["L", "R", "R", "R"])
-        pdf.parrafo("La distancia entre el fondo y el portafolio de máximo Sharpe es el costo de la diversificación exigida por "
-                    "la política (5 sectores con igual peso, mínimo 5 % por activo, alto riesgo, Asia y VaR).", 6.4, GRIS)
-
-    pdf.titulo("14–17. Vinculadas, gerentes, revisor fiscal y defensor del consumidor")
+    pdf.titulo("14–17. Vinculadas, gerentes, revisor fiscal y defensor del consumidor", reserva=24)
     pdf.kv([("14. Empresas vinculadas", "No aplica (ejercicio académico)"),
             ("15. Hoja de vida de los gerentes", "Estudiantes de Gestión de Portafolios, Universidad del Valle (equipo gestor)"),
             ("16. Revisor fiscal · 17. Defensor del consumidor", "No aplica (ejercicio académico)")])
 
-    pdf.titulo("Verificación de la política")
-    pdf.tabla(["Origen", "Regla", "Valor", "Cumple"], [tuple(x) for x in verif.values.tolist()], [24, 88, 58, 16],
-              ["L", "L", "L", "C"], tam=6.8)
+    # ------------------------------------------------------------ anexos
+    pdf.titulo(f"Anexo A. Cada activo frente a su índice local ({M.VENTANA_ANIOS} años, moneda local)", reserva=60)
+    filas = [(a, M.NOMBRE_INDICE.get(r["Índice local"], r["Índice local"]), pct(r["Rentabilidad anual"]), pct(r["Rentabilidad del índice"]),
+              num(r["Sharpe"]), num(r["Sharpe del índice"]), num(r["Beta local"]), num(r.get("Beta local 5 años")), pct(r["Alfa de Jensen"]))
+             for a, r in f.iterrows()]
+    pdf.tabla(["Activo", "Índice", "Rent. activo", "Rent. índice", "Sharpe", "Sharpe índ.", "Beta 3a", "Beta 5a", "Alfa"], filas,
+              [22, 20, 22, 22, 18, 20, 18, 18, 26], ["L", "L", "R", "R", "R", "R", "R", "R", "R"])
+    pdf.parrafo("Rentabilidades: promedio aritmético de los rendimientos mensuales en moneda local, anualizado (× 12), con la "
+                "tasa libre de riesgo de cada país. Por eso difieren de las del anexo B, que son tasas compuestas con precios "
+                "diarios en USD.", 6.4, GRIS)
+
+    def tabla_comp(comp):
+        cols = list(comp.columns)
+        filas = []
+        for k in comp.index:
+            vals = [(f"{v:,.0f}".replace(",", ".") if "USD" in k else (num(v) if k.startswith(("Sharpe", "Beta", "Treynor", "Information")) else pct(v)))
+                    for v in comp.loc[k]]
+            filas.append((k,) + tuple(vals))
+        w0 = 186 - 50
+        pdf.tabla(["Indicador"] + cols, filas, [50] + [w0 / len(cols)] * len(cols), ["L"] + ["R"] * len(cols), tam=6.8)
+
+    pdf.titulo(f"Anexo B. Indicadores del fondo frente a los índices (simulación de {M.VENTANA_ANIOS} años, USD)", reserva=60)
+    tabla_comp(comp_indices)
+    var_usd = f"{rs['VaR 95 % 1 mes (USD)']:,.0f}".replace(",", ".")
+    pdf.parrafo(f"Tasa compuesta anual con precios diarios en USD. El VaR histórico usa la volatilidad observada; el VaR "
+                f"esperado del anexo F usa la volatilidad esperada del modelo ({pct(rs['VaR 95 % 1 mes (%)'])}, USD {var_usd}). "
+                "Simulación dentro de muestra: sobrestima la rentabilidad.", 6.4, GRIS)
+
+    pdf.titulo("Anexo C. Prueba fuera de muestra", reserva=70)
+    if oos is None or oos.get("error"):
+        pdf.parrafo("No fue posible armar el portafolio con los datos de octubre de 2023"
+                    + (f": {oos['error']}" if oos else "."), 7.2, GRIS)
+    else:
+        r0 = oos["res"]
+        pdf.parrafo(f"Misma metodología con los precios disponibles hasta el {fecha_larga(oos['fecha'])}; el portafolio que "
+                    f"resultó ({', '.join(f'{a} {pct(p, 0)}' for a, p in r0['pesos'].items())}) se simuló desde esa fecha "
+                    "hasta hoy, con datos que no se usaron para escoger las empresas.", 7.2)
+        pdf.image(_grafico_evolucion(oos["serie"], 2.0), x=12, w=186)
+        tabla_comp(oos["comp"])
+        pdf.parrafo("Limitación: los fundamentales y la lista de empresas del S&P 500 son los de hoy (Yahoo Finance no publica "
+                    "su historia), así que la prueba conserva algo de sesgo.", 6.4, GRIS)
+
+    pdf.titulo("Anexo D. Salud financiera, valoración y ASG de los activos", reserva=4.6 + 4.4 * (len(f) + 1) + 14)
+    filas = [(a, pct(r["ROA (Retorno Activos)"]), pct(r["ROE (Retorno Capital)"]),
+              "n. a." if r["Sector"] == "Servicios financieros" else num(r["Ratio Liquidez (Current Ratio)"]) + "x",
+              "n. a." if r["Sector"] == "Servicios financieros" else pct(r["Endeudamiento"]),
+              num(r.get("Puntaje de salud")), num(r.get("PER (Price/Earnings Ratio)"), 1), num(r.get("Q de Tobin (P/VL)"), 1),
+              pct(r.get("Dividend yield")), r["Nivel de salud"], num(r.get(M.COL_RIESGO_ASG), 1)) for a, r in f.iterrows()]
+    pdf.tabla(["Activo", "ROA", "ROE", "Liquidez", "Endeud.", "Puntos", "PER", "Q Tobin", "Div. yield", "Salud", "Riesgo ASG"], filas,
+              [20, 15, 15, 16, 16, 14, 15, 15, 17, 18, 25], ["L", "R", "R", "R", "R", "R", "R", "R", "R", "L", "R"], tam=6.8)
+    notas = []
+    if "WELL" in f.index:
+        notas.append("WELL es un fideicomiso inmobiliario (REIT): la depreciación de los edificios reduce su utilidad contable, "
+                     "por eso su ROA, ROE y PER se ven débiles; en los REIT se analizan los fondos de operación (FFO).")
+    unicos = f.index[(f["Activos en su sector"] == 1) & (f["Elegibles en su sector"] <= 1)]
+    if len(unicos):
+        notas.append(f"{' y '.join(unicos)}: {'única empresa' if len(unicos) == 1 else 'únicas empresas'} de su sector que "
+                     f"{'pasó' if len(unicos) == 1 else 'pasaron'} todos los filtros; "
+                     f"{'lleva' if len(unicos) == 1 else 'llevan'} el peso completo del sector.")
+    bajas = f.index[f["Beta local"] < 0.3]
+    if len(bajas):
+        notas.append(f"{', '.join(bajas)}: beta cercana a cero, se mueve poco con el mercado (en defensa pesan la geopolítica "
+                     "y los presupuestos militares); aporta diversificación.")
+    for a, r in f.iterrows():
+        if r["Nota ASG"]:
+            notas.append(f"{a} (ASG): {r['Nota ASG']}")
+    if notas:
+        pdf.parrafo("Puntos: promedio del semáforo de salud (2, 1 o 0 por indicador; nivel Bueno con 1,5 o más). Riesgo ASG: "
+                    "ESG Risk Score de Sustainalytics (se excluye 40 o más). " + " ".join(notas), 6.4, GRIS)
+
+    if "frontera" in res:
+        pdf.titulo("Anexo E. Frontera eficiente de Markowitz (sin ventas en corto)", reserva=110)
+        pdf.image(_grafico_frontera(res), x=12, w=186)
+        fr = res["frontera"]["fondo"]
+        filas = [(f"Mínima varianza ({len(f)} activos)", pct(fr["min_varianza"]["Rentabilidad"]), pct(fr["min_varianza"]["Volatilidad"]),
+                  num((fr["min_varianza"]["Rentabilidad"] - fr["rf"]) / fr["min_varianza"]["Volatilidad"])),
+                 (f"Máximo Sharpe ({len(f)} activos, sin política)", pct(fr["max_sharpe"]["Rentabilidad"]),
+                  pct(fr["max_sharpe"]["Volatilidad"]), num(fr["max_sharpe"]["Sharpe"])),
+                 ("Fondo (con la política) · rentabilidad bruta", pct(rs["E(R) anual"]), pct(rs["Volatilidad anual"]), num(rs["Sharpe"])),
+                 ("Fondo · rentabilidad neta de comisión (2,5 %)", pct(rs["E(R) neta de comisión"]), pct(rs["Volatilidad anual"]),
+                  num((rs["E(R) neta de comisión"] - rs["Rf"]) / rs["Volatilidad anual"]))]
+        pdf.tabla(["Portafolio", "Rentabilidad esperada", "Volatilidad", "Sharpe"], filas, [86, 36, 32, 32], ["L", "R", "R", "R"])
+        txt = ("La distancia entre el fondo y el portafolio de máximo Sharpe es el costo de la diversificación exigida por la "
+               "política (5 sectores con igual peso, mínimo 5 % por activo, β > 1, Asia y VaR). Las filas del fondo incluyen el "
+               "5 % de liquidez; el gráfico muestra solo la parte en acciones.")
+        if res["frontera"].get("mismas_empresas"):
+            txt += (" Solo estas empresas pasaron todos los filtros en la fecha de selección, así que la frontera con todas las "
+                    "elegibles coincide con la del fondo.")
+        pdf.parrafo(txt, 6.4, GRIS)
+
+    pdf.titulo("Anexo F. Verificación de la política", reserva=4.6 + 4.4 * (len(verif) + 1))
+    pdf.tabla(["Origen", "Regla", "Valor", "Cumple"], [tuple(x) for x in verif.values.tolist()], [25, 93, 52, 16],
+              ["L", "L", "L", "C"], tam=6.6)
+    pdf.parrafo("«Informativo»: dato que se reporta sin ser una regla obligatoria. La correlación en meses de caída es una meta "
+                "de diversificación, no un límite.", 6.4, GRIS)
 
     pdf.ln(2)
     pdf.parrafo("Advertencia. Este material es para información de los inversionistas y no constituye una oferta ni una solicitud "
                 "para comprar o vender valores. Las obligaciones de la sociedad administradora relacionadas con la gestión del "
                 "portafolio son de medio y no de resultado. La inversión está sujeta a los riesgos de los activos que componen el "
-                "fondo. Las rentabilidades históricas son simulaciones con los pesos actuales y no garantizan rentabilidades "
-                "futuras. Ejercicio académico del curso Gestión de Portafolios, Universidad del Valle.", 6.4, GRIS)
+                "fondo, incluido el riesgo de tasa de cambio. Las rentabilidades históricas son simulaciones con los pesos actuales "
+                "sobre empresas escogidas con datos de ese mismo periodo, por lo que sobrestiman la rentabilidad que se habría "
+                "obtenido; no garantizan rentabilidades futuras. Ejercicio académico del curso Gestión de Portafolios, "
+                "Universidad del Valle.", 6.4, GRIS)
     return bytes(pdf.output())
